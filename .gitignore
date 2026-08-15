@@ -1,0 +1,18 @@
+# Build output & runtime data
+build/bin/
+build/bin/data/
+
+# Frontend generated
+frontend/node_modules/
+frontend/dist/
+frontend/wailsjs/
+
+# Stale wails v3 experiment
+assets/
+
+# Local tooling
+.omo/
+.codegraph
+
+# Logs
+*.log

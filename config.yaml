@@ -1,0 +1,76 @@
+app:
+    name: Dashboard
+    version: 1.0.0
+    debug: true
+services:
+    minecraft:
+        name: Minecraft Network
+        base_url: http://51.75.77.248:9800
+        api_prefix: /api
+        auth:
+            type: basic
+            username_env: MINECRAFT_USER
+            password_env: MINECRAFT_PASS
+        timeout_seconds: 15
+        proxy_enabled: true
+        endpoints:
+            status: /status
+            servers: /servers
+            players: /players
+            console: /console
+    neuronet:
+        name: NeuroNet
+        base_url: http://localhost:8000
+        admin_path: /admin
+        api_prefix: /api
+        auth:
+            type: none
+        timeout_seconds: 30
+        proxy_enabled: true
+        endpoints:
+            health: /health
+            models: /models
+            training: /training
+            inference: /inference
+    slotbuilder:
+        name: SlotBuilder
+        base_url: ""
+        backoffice_url: https://backoffice.7casinogames.com
+        frontend_url: https://7casinogames.com
+        api_prefix: /api
+        auth:
+            type: bearer
+            token_env: SLOTBUILDER_TOKEN
+        timeout_seconds: 30
+        proxy_enabled: true
+        endpoints:
+            games: /games
+            analytics: /analytics
+            deployments: /deployments
+            config: /config
+proxy:
+    enabled: true
+    allowed_hosts:
+        - localhost:8000
+        - 51.75.77.248:9800
+        - backoffice.7casinogames.com
+        - 7casinogames.com
+    timeout_seconds: 60
+    max_body_size_mb: 50
+ui:
+    theme: system
+    default_tab: neuronet
+    webview_gpu_policy: always
+    tabs:
+        - id: neuronet
+          label: NeuroNet
+          icon: brain
+          enabled: true
+        - id: minecraft
+          label: Minecraft
+          icon: server
+          enabled: true
+        - id: slotbuilder
+          label: SlotBuilder
+          icon: gamepad
+          enabled: true

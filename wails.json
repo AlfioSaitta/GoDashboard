@@ -1,0 +1,26 @@
+{
+  "name": "Dashboard",
+  "outputfilename": "Dashboard",
+  "frontend:install": "cd frontend && npm install",
+  "frontend:build": "cd frontend && npm run build",
+  "frontend:dev:watcher": "cd frontend && npm run dev",
+  "frontend:dev:serverUrl": "http://localhost:34115",
+  "author": {
+    "name": "Alfio",
+    "email": ""
+  },
+  "info": {
+    "version": "1.0.0",
+    "description": "Multi-service dashboard for NeuroNet, Minecraft, and SlotBuilder"
+  },
+  "assetdir": "frontend/dist",
+  "build:windows": {
+    "icon": "build/icon.ico"
+  },
+  "build:darwin": {
+    "icon": "build/icon.icns"
+  },
+  "build:linux": {
+    "icon": "build/icon.png"
+  }
+}
