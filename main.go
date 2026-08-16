@@ -129,6 +129,7 @@ func NewApp() *App {
 
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
+	shellCtx = ctx
 	logger.Printf("App.Startup called")
 
 	a.scheduleCookieSnapshots()
@@ -301,6 +302,7 @@ func (a *App) SetTheme(ctx context.Context, theme string) error {
 		return err
 	}
 	logger.Printf("SetTheme: %q saved", theme)
+	wailsRuntime.EventsEmit(a.ctx, "shell:theme", theme)
 	return nil
 }
 
@@ -571,14 +573,38 @@ func main() {
 	}()
 
 	app := NewApp()
+	activeApp = app
 
 	if err := enablePersistentCookies(); err != nil {
 		log.Printf("Warning: failed to enable persistent webview cookies: %v", err)
 	}
 
+	// Schedule the native tab-shell repackage (chrome strip + tab stack) to run
+	// at the start of the GTK main loop, right after Wails pipes its widgets.
+	shellSetup()
+
+	// WebKit discards nothing on rebuild: the settings page and its assets get
+	// cached under <exedir>/data/cache/Dashboard keyed by URL, so an older
+	// bundle can outlive a new binary (stale settings window, no auto-resize).
+	// The HTTP resource cache is per-run state (websites data lives in the data
+	// dir), so clearing this folder on every start keeps the UI always fresh.
+	clearWebviewResourceCache()
+
 	err := runApp(app)
 	if err != nil {
 		logger.Fatalf("App error: %v", err)
+	}
+}
+
+// clearWebviewResourceCache removes WebKit's on-disk resource cache so a
+// rebuild can never leave a stale cached frontend bundle behind (see main()).
+func clearWebviewResourceCache() {
+	appCache := filepath.Join(paths.WebviewCacheDir(), "Dashboard")
+	if err := os.RemoveAll(appCache); err != nil {
+		logger.Printf("Warning: failed to clear webview cache: %v", err)
+	}
+	if err := os.MkdirAll(appCache, 0o755); err != nil {
+		logger.Printf("Warning: failed to recreate webview cache dir: %v", err)
 	}
 }
 

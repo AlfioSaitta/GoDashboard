@@ -7,7 +7,7 @@ export class TabBar {
   constructor(container, {
     onTabChange, onAddTab, onReorder, onSetDefault,
     onOpenExternal, onRenameTab, onDuplicateTab,
-    onZoom, onResetZoom, onToggleToolbar,
+    onZoom, onResetZoom, onPopupChange,
   }) {
     this.container = container
     this.onTabChange = onTabChange
@@ -19,7 +19,7 @@ export class TabBar {
     this.onDuplicateTab = onDuplicateTab
     this.onZoom = onZoom
     this.onResetZoom = onResetZoom
-    this.onToggleToolbar = onToggleToolbar
+    this.onPopupChange = onPopupChange
     this.tabs = []
     this.statuses = []
     this.activeTab = null
@@ -147,7 +147,6 @@ export class TabBar {
   showContextMenu(x, y, tab) {
     const menu = this.container.querySelector('#tab-context-menu')
     const isDefault = this.container.dataset.defaultTabId === String(tab.id)
-    const isPanel = !!serviceForTab(tab)
     const zoom = Math.round(tabZoom(tab) * 100)
 
     const items = [
@@ -162,14 +161,6 @@ export class TabBar {
       { label: zoom === 100 ? 'Zoom 100%' : 'Reimposta zoom', icon: 'refresh', keep: true, action: () => this.onResetZoom && this.onResetZoom(tab) },
     ]
 
-    if (!isPanel) {
-      const toolbarOn = !!(tab.settings && tab.settings.toolbar)
-      items.push(
-        { divider: true },
-        { label: toolbarOn ? 'Barra strumenti ✓' : 'Barra strumenti', icon: 'layers', action: () => this.onToggleToolbar && this.onToggleToolbar(tab) },
-      )
-    }
-
     menu.innerHTML = items.map((it, i) => it.divider
       ? '<div class="ctx-divider"></div>'
       : it.disabled
@@ -181,6 +172,7 @@ export class TabBar {
       menu.hidden = true
       document.removeEventListener('click', onDocClick)
       document.removeEventListener('keydown', onKeyDown)
+      if (this.onPopupChange) this.onPopupChange(false)
     }
     const onDocClick = (e) => {
       if (menu.contains(e.target)) return
@@ -210,8 +202,9 @@ export class TabBar {
     document.addEventListener('keydown', onKeyDown)
 
     menu.hidden = false
+    if (this.onPopupChange) this.onPopupChange(true)
     const rect = menu.getBoundingClientRect()
-    // Keep the open menu inside the window (also when near the bottom edge).
+    // Keep the open menu inside the (temporarily expanded) window.
     const left = Math.min(x, window.innerWidth - rect.width - 8)
     const top = Math.min(y, window.innerHeight - rect.height - 8)
     menu.style.left = `${Math.max(8, left)}px`
@@ -283,6 +276,17 @@ export class TabBar {
     // Scroll the active tab into view when the tab bar overflows.
     const active = this.container.querySelector(`.tab-bar-item.active`)
     if (active) active.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
+  }
+
+  // Sets a TRANSIENT page title on a tab (the rendered <title> of its native
+  // webview). Only the display text changes: the stored label stays intact and
+  // is restored on the next renderTabs().
+  setPageTitle(tabId, title) {
+    if (!title || !String(title).trim()) return
+    const item = this.container.querySelector(`.tab-bar-item[data-tab-id="${CSS.escape(String(tabId))}"]`)
+    if (!item) return
+    const label = item.querySelector('.tab-label')
+    if (label && !item.classList.contains('renaming')) label.textContent = String(title)
   }
 
   setDefaultTabId(tabId) {

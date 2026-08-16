@@ -5,13 +5,21 @@ A Go/Wails v2 desktop dashboard for monitoring three services:
 - **Minecraft Network** - Admin panel at `http://51.75.77.248:9800`
 - **SlotBuilder** - Backoffice at `https://backoffice.7casinogames.com`, frontend at `https://7casinogames.com`
 
-The app **works**: builds, runs, renders the UI, loads tabs from Go, refreshes panel data, tray/frameless/theme work. This file documents the REAL project structure (verified by inspection), not a plan.
+The app **works**: builds, runs, renders the UI, loads tabs from Go, and each tab is a
+**native WebKitWebView** (not an iframe). Chrome (header + tab bar) is a thin fixed
+strip; content lives in a `GtkStack` of per-tab webviews. Tray/frameless/theme/cookies
+work. This file documents the REAL project structure (verified by inspection), not a plan.
 
 ## Project Structure
 ```
 /home/alfio/Projects/Dashboard/
 ├── main.go                # EVERYTHING app-level: App struct, all Wails-bound methods, wails.Run()
-├── inspector.go           # cgo: WebKitGTK page inspector (dock bottom / right / left / floating window)
+├── tabs_shell.go          # cgo (package main): native tab shell — GtkStack + per-tab WebKitWebView (webkit2_41)
+├── tabs_shell_export.go   # cgo: //export callbacks (shell title/uri → wails events) + shellCtx
+├── shell_app.go           # App methods: ShellShowTab/ShellDestroyTab/ShellReorder/ShellZoom/
+│                          #   ShellSetChromeHeight/OpenSettings/CloseSettings/TabsChanged + resolveTabURL
+├── settings_bridge.go     # Bridge Go for the settings WINDOW (dispatch on App + __dashReply)
+├── inspector.go           # cgo: WebKitGTK page inspector per single tab webview (dock bottom/right/left/float)
 ├── persistent_cookies.go  # cgo: WebKitGTK cookie manager → SQLite persistent storage (webkit2_41)
 ├── wails.json             # Wails v2 config (embed dir: frontend/dist)
 ├── config.yaml            # Dev config; migrated into build/bin/data/config.yaml at first run
@@ -23,21 +31,22 @@ The app **works**: builds, runs, renders the UI, loads tabs from Go, refreshes p
 │   └── bin/Dashboard      # Compiled binary (all runtime data in ./data next to it)
 ├── frontend/
 │   ├── index.html         # Vite input (at frontend ROOT, not src/); gamepad-style placeholder
+│   ├── settings.html      # Vite input for the NATIVE settings window (no Wails runtime)
 │   ├── src/
 │   │   ├── main.js        # Imports main.css + mounts App on DOMContentLoaded
-│   │   ├── app.js         # Renders chrome: header, tab bar, panels, settings, keyboard nav
+│   │   ├── settings/      # Settings-window SPA (separate bundle): bridge + SettingsModal
+│   │   │   └── main.js
+│   │   ├── app.js         # Renders chrome strip (header + tab bar) OR settings view (#settings)
 │   │   ├── components/
-│   │   │   ├── TabBar/TabBar.js             # Tab bar: active, close, drag&drop order, context menu, rename
-│   │   │   ├── SettingsModal/SettingsModal.js # Modal to add/edit/remove tabs
-│   │   │   └── *Panel/                      # NeuroNetPanel, MinecraftPanel, SlotBuilderPanel
-│   │   │       ├── *Panel.js                # Lifecycle: render/mount/unmount/refresh
-│   │   │       └── *Panel.css               # Per-panel styles
-│   │   ├── services/api.js                  # Stateless wrappers over wailsjs bindings
+│   │   │   ├── TabBar/TabBar.js             # Tab bar: active, drag&drop order, context menu, rename
+│   │   │   ├── SettingsModal/SettingsModal.js # Modal (full-window in native settings window) to add/edit/remove tabs
+│   │   │   └── Shared/{utils,services}.js  # icon; urlForTab
+│   │   ├── services/api.js                  # Stateless wrappers over wailsjs bindings (incl. shell*)
 │   │   ├── stores/dashboard.js              # Singleton store: tabs, lastStatuses, listeners
 │   │   └── styles/main.css                  # THEME: CSS variables, dark/light, tab bar, modal, cards
 │   ├── wailsjs/           # AUTO-GENERATED bindings (do not hand-edit)
 │   ├── dist/              # Built assets embedded by Wails
-│   ├── vite.config.js     # Single-bundle build; inline runtime bootstrap calling App.CreateApp()
+│   ├── vite.config.js     # Multi-entry build (index + settings); CreateApp bootstrap only in index.html
 │   └── package.json
 └── internal/
     ├── api/
@@ -60,15 +69,61 @@ The app **works**: builds, runs, renders the UI, loads tabs from Go, refreshes p
 The `App` struct holds everything: `cfg`, `manager`, `proxy`, `dashboardAPI`, `tabAPI`,
 `tabManager`, `cookieStore`, `cookieAPI`, `tray`. `NewApp()` wires them in order.
 `main()` sets `GDK_BACKEND=x11` for KDE Wayland (X11/XWayland required for frameless),
-then creates the app, then `runApp(app)` calls `wails.Run(opts)` with:
+enables persistent cookies, calls `shellSetup()` (re-groups the window into the
+chrome strip + tab stack, see tabs_shell.go) BEFORE `wails.Run()`, then creates the
+app and calls `runApp(app)` → `wails.Run(opts)` with:
 - `Frameless: true`, `SingleInstanceLock` (`it.alfio.Dashboard`), `OpenInspectorOnStartup: false`
   (the WebKit inspector is opened on demand from the header dropdown / Ctrl+Shift+F12 once
   the binary is built with the `devtools` tag, see inspector.go)
 - `Linux.WebviewGpuPolicy`: from config `ui.webview_gpu_policy` (`always` default → hardware
-  acceleration; `never` = software rendering = slow iframe scrolling). Fixed `Never` caused
-  sluggish scrolling of iframed pages; see main.go `webviewGpuPolicy()`. Runs on X11 backend.
+  acceleration; `never` = software rendering). Runs on X11 backend.
 
 `go:embed frontend/dist frontend/wailsjs` + `go:embed build/icon.png`.
+
+`App.Startup` stores the context in `app.ctx` AND in the package-level `shellCtx`
+(tabs_shell_export.go) so the exported C callbacks can emit events after startup.
+
+### tabs_shell.go — the native tab shell (cgo, tag `webkit2_41`)
+The core of the new architecture. The single Wails webview is repackaged into a
+**fixed chrome strip** and the rest of the window is filled by a `GtkStack` that
+holds one **own WebKitWebView per tab**:
+- `main()` runs `shellSetup()` before `wails.Run()`. Because Wails packs the raw
+  webview into `vbox → webviewBox` only when `Frontend.Run` executes (before
+  `gtk_main`), the idle callback registered for setup runs on the FIRST main-loop
+  iteration and reparents/re-sizes the widgets — no visible flash.
+- Tree: `GtkWindow → vbox → chromeBox (the Wails webview, height = strip) +   GtkStack "shell-stack" (expand)`.
+- Every tab webview is lazy: created on first `shell_show_tab` by name `tab-<id>`,
+  `webkit_settings_set_enable_developer_extras(TRUE)` (devtools), `load_uri`, then
+  `gtk_widget_grab_focus`. Tab widgets are tagged with `g_object_set_data(... "tab-id")`
+  so `shell_find_tab(id)` can find them.
+- Tab **title/URI** are forwarded to the chrome via `//export exportShellTitle/
+  exportShellUri` (tabs_shell_export.go) → wails events `shell:title` / `shell:uri`
+  (`{tabId, title|uri}`) on `shellCtx` → `tabBar.setPageTitle` in app.js.
+- All Wails-bound Go methods go through `shell_request(...)` → `g_idle_add` →
+  `shell_req_cb`, so every GTK/WebKit call happens on the GTK main thread. Ops:
+  `0=setup, 1=show, 2=destroy, 3=reorder, 4=zoom, 5=chrome height, 6=open settings,
+  7=close settings, 8=inspector`. (each shell_* C function keeps a re-entrance guard
+  so the idle-reinvoked code path does not repackage twice).
+- **Home strip**: repackaging the WebKitView into `vbox` also REMOVES the roaming
+  WebKit home-iframe whitespace/resize quirks on the tab strip (the DA does not
+  stretch the strip or the stack).
+- The native tab shell replaced the old iframe/panel implementation: each tab is now
+  a real browsing context (real cookies/localStorage/HSTS via the shared default
+  web context, no CORS limits, inspector per tab).
+
+### shell_app.go — Wails-bound shell controller
+Every `App` method below also has a `...NoContext` twin (frontend calls those):
+- `ShellShowTab(id)` / `ShellDestroyTab(id)` / `ShellReorder(ids)` / `ShellZoom(id, level)`
+- `ShellSetChromeHeight(px)` (clamped 40–400) — repackages the chromewebview (`size_request`);
+  the tab-stack expands to fill the new layout
+- `OpenSettings()` / `CloseSettings()` — opens/closes the **native settings window**
+  (a second WebKitWebView with a DEDICATED user content manager, loading
+  `wails://wails/settings.html`; `delete-event` hides it — see tabs_shell.go:
+  shell_open_settings)
+- `TabsChanged()` — emits `tabs:changed` (for the settings window / chrome to reload tabs)
+- `resolveTabURL(tab)` — builds the real admin URL for builtin tabs
+  (service key → `backoffice_url > base_url+admin_path > base_url`, legacy fallbacks)
+- `tabZoomOf(tab)` — reads `settings["zoom"]` (0.5–2.5, default 1)
 
 ### Wails method binding pattern (IMPORTANT)
 Every frontend-callable method exists in TWO forms on `App`:
@@ -88,29 +143,22 @@ and `TabAPI` (tab CRUD):
 - `TabAPI.UpdateTabSettings(id, settings)` — replaces the per-tab display settings bag
 - `TabAPI.ReorderTabs(ids []int)` — reorders by id list (added for drag&drop)
 - API response types (`TabInfo`, `ServiceStatus`, sub-dashboards, proxy types) all here.
-  `TabInfo.Settings` carries the per-tab display settings (`{zoom: float, toolbar: bool}`).
+  `TabInfo.Settings` carries the per-tab display settings (`{zoom: float}`).
 - NOTE: `AddTab`/`RemoveTab` are NOT on TabAPI; they're methods directly on `App`
   (in main.go) operating on `a.tabManager`.
 
-### inspector.go — WebKitGTK page inspector for TAB pages (require `devtools` tag)
-cgo shim. The whole dashboard renders in ONE WebKitWebView, so attaching the
-inspector to it would debug the dashboard DOM, not the tab's page. Instead a
-dedicated *inspection webview* (a top-level window) is created ONCE, loads the
-tab's real URL (`App.InspectorOpen(mode, url)`; service admin URL for built-in
-panels, the iframe URL for URL tabs), enables developer extras on itself and is
-the inspection target. It uses the default web context, so it shares
-cookies/localStorage/session with the tab iframes. All GTK/WebKit access is
-marshalled onto the GTK main thread via `g_idle_add` (Wails-bound Go methods
-only enqueue a request carrying mode + URL). Layouts:
-- `bottom` — `webkit_web_inspector_attach` (native dock at the bottom of the
-  inspection window)
-- `right`/`left` — `webkit_web_inspector_detach` then position/size the
-  inspector's own window beside the inspection window, kept glued via a
-  `configure-event` handler
-- `float` — detached, freely movable
-- `close` — `webkit_web_inspector_close`
-Requires the `devtools` build tag for the MAIN webview's developer extras
-(Ctrl+Shift+F12); the inspection webview enables its own devtools regardless.
+### inspector.go — WebKitGTK page inspector for TAB pages (defunct; per-tab now)
+The old standalone *inspection webview* approach (a second window loading the tab URL)
+was REMOVED: each tab already is a real WebKitWebView. `inspector.go` now only exposes
+thin Wails methods that turn on the extension via the native tab shell (see tabs_shell.go):
+- `InspectorAvailable() → true` (guarded by the `devtools` tag via `//go:build`)
+- `InspectorOpen(ctx, mode, tabID)` with `mode ∈ bottom|float|right|left|close`
+  → `shellPostInspector(8, mode, tabID)`; `tabID=0` targets the chrome strip
+- `InspectorClose(ctx, tabID)` → mode `close`
+- Layouts (implemented in C, shell_inspector): `bottom` = `webkit_web_inspector_attach`;
+  `right`/`left` = `detach` + glue beside `shell_main_win` via `configure-event`;
+  `float` = detached, freely movable.
+The main dashboard webview + every tab webview enable developer extras at creation.
 
 ### internal/cookie/store.go + api/cookies.go
 Persistent per-domain cookie jar backed by `<exedir>/data/cookies.json` (portable).
@@ -130,14 +178,15 @@ with a `customTransport` that strips Origin/Referer, plus:
   (wired in `modifyResponse` and after `ProxyRequest`)
 - `ProxyRequest(ctx, models.ProxyRequest)` — Wails-exposed JSON proxy with header map,
   basic/bearer auth from env, cookie inject/capture.
-CORS: `Access-Control-Allow-Origin: *`, strips X-Frame-Options/CSP so iframes work.
+CORS: `Access-Control-Allow-Origin: *`, strips X-Frame-Options/CSP so proxies/iframes work.
+NOTE: since tabs became native webviews the proxy is no longer required for the tab content.
 
 ### internal/services/{clients,manager}.go
 `HTTPClient` wraps an `http.Client`; `addAuth` applies config `Auth.Type`:
 - `basic` → username/password from env vars (MINECRAFT_USER/PASS)
 - `bearer` → token from env (SLOTBUILDER_TOKEN)
 `ServiceManager` owns one client per configured service; `CheckAllHealth` probes each
-(5s timeout) and `GetXxxDashboard` gathers lists for the panels.
+(5s timeout) and `GetXxxDashboard` gathers lists (used by the health/status pills).
 
 ### internal/tab/manager.go
 `TabManager` persists `[]Tab{ID,Title,URL,Icon}` to `data/tabs.json`
@@ -152,57 +201,129 @@ the window; `Quit` closes. `OpenExternal(url)` in main.go uses `xdg-open`.
 
 ## Frontend Architecture
 
-### Single entry: frontend/src/main.js
-Imports `styles/main.css` (must be imported here; tree-shaken otherwise) then mounts
-`createApp()` from app.js. `vite.config.js` injects an inline bootstrap into the
-generated `dist/index.html` that awaits `window.go.main.App.CreateApp()` before the
-bundle loads (so `window.go` exists). Any vite.config change needs a full rebuild.
+### Entries: index (chrome) + settings.html (settings window)
+`frontend/src/main.js` imports `styles/main.css` (must be imported here; tree-shaken
+otherwise) then mounts `createApp()` from app.js. `vite.config.js` injects an inline
+bootstrap into the generated `dist/index.html` that awaits
+`window.go.main.App.CreateApp()` before the bundle loads (so `window.go` exists);
+the plugin is scoped to `index.html` only — settings.html runs WITHOUT the Wails
+runtime (custom bridge). Any vite.config change needs a full rebuild.
 
 ### app.js — UI chrome
 `createApp()`:
 1. `getSystemTheme()` → sets `document.documentElement.dataset.theme`
-2. Injects header/brand/status pills/settings/win-controls/sidebar/content skeleton
-3. Builds `tabBar` with callbacks: onTabChange→switchTab, onAddTab→openSettings,
-   onReorder→`api.reorderTabs`+reload, onSetDefault,
+2. `mountChrome()` builds header/brand/status pills/settings/win-controls + `tabBar` —
+   NO `.dashboard-content`, no panels; tab content lives in native webviews. (The
+   `location.hash === '#settings'` branch is a legacy fallback; the native settings
+   window loads its own page, see below.)
+3. `mountChrome()` builds header/brand/status pills/settings/win-controls + `tabBar`
+   with callbacks: onTabChange→switchTab (→ `api.shellShowTab`), onAddTab→openSettings,
+   onReorder→`api.reorderTabs`+`api.shellReorder`+reload, onSetDefault,
    onOpenExternal→`api.openExternal`, onRenameTab, onDuplicateTab,
-   onZoom/onResetZoom/onToggleToolbar → per-tab display settings
-4. `panels` map (neuronet/minecraft/slotbuilder) — `panelForTab(tab)` matches by
-   URL/label substring; matching → panel view; unknown URL → iframe view
-5. **Tab views are kept alive** (`viewCache` Map). `switchTab()` only toggles the
-   `active` class (CSS `display`) — it NEVER re-creates or destroys a view, so
-   iframes keep their browsing context (login/session/cookies) when switching
-   tabs. Non-active `.panel` roots are hidden by CSS (`.dashboard-content > .panel
-   { display: none }`, `.panel.active { display: flex }`). `ensureView()` builds a
-   view once, mounts panels once (`panel.mounted` flag), refreshes on first
-   mount only; panel auto-refresh is `startAutoRefresh`/`stopAutoRefresh` bound
-   to visibility (idempotent `startAutoRefresh` prevents duplicate intervals).
-   Removed tabs are cleaned up via `destroyView` in `loadTabs`.
-   **GOTCHA (fixed)**: `viewCache` keys are STRINGS (`String(tab.id)`). `switchTab`
-   previously looked up with the numeric id (`viewCache.get(currentViewId)`), which
-   never matched, so the previous panel kept `.active` and both were `display: flex`
-   (tabs stacked one under the other). Always use `String(id)`/`String(tab.id)` for
-   `viewCache.has()/get()`.
-6. `loadServiceStatus()` every 30s → `tabBar.setStatuses()` (no header pills)
-7. `loadTabs({preserveActive})` → `api.getTabs()`, drops stale cached views,
-   respects current active tab vs `dashboardStore.getDefaultTab()` (localStorage
-   `dashboard_default_tab`, default 'neuronet')
-8. Window controls: min/max/close/to-maximise-state via `api.window*` (wailsjs runtime)
-9. Keyboard nav (on document keydown): **Ctrl+Tab**/Ctrl+Shift+Tab cycle tabs,
-   **Ctrl+T** open settings, **Ctrl+± / Ctrl+0** zoom the active tab.
-10. **Per-tab display settings** — every tab carries a `settings` map persisted
-    through `api.updateTabSettings` (→ `App.UpdateTabSettingsNoContext` → tabs.json).
-    `zoom` (0.5–2.5, CSS `zoom` on the view root) and `toolbar` (bool, shows the
-    URL-toolbar with reload + zoom on iframe tabs). `applyViewSettings()` applies
-    them to kept-alive views; `setTabZoom`/`updateTabSettings` persist + apply live.
-    URL tabs render an optional `.url-toolbar` (reload, zoom −/%, +, reset).
-11. **Inspector dropdown** (header, right of settings) — `api.inspectorOpen(mode)`
-    with `bottom|right|left|float` and `api.inspectorClose()`; hidden automatically
-    when `api.inspectorAvailable()` is false.
+   onZoom/onResetZoom → `api.shellZoom` (native zoom) + persist settings.
+4. **Chrome strip height**: `measureStripHeight()` = `tabBar.getBoundingClientRect().bottom + 2`
+   (min 60, fallback 104) → `api.shellSetChromeHeight(px)`; debounced (30ms) + on window
+   resize. **DOM popups** (context menu, inspector dropdown) that would be clipped by the
+   thin strip use `expandStrip()` (height 2400) / `collapseStrip()` (`stripExpanded` guard).
+5. **Native tab lifecycle** (keep-alive): `switchTab(tab)` calls `api.shellShowTab(tab.id)`
+   and tracks the active id. `loadTabs()` removes webviews of deleted tabs via
+   `knownTabIds` (per-process) → `api.shellDestroyTab(id)`; respects
+   `dashboardStore.getDefaultTab()` (localStorage `dashboard_default_tab`, default 'neuronet').
+6. Events from Go: `runtime.EventsOn('shell:title')` → `tabBar.setPageTitle(id, title)`;
+   `EventsOn('tabs:changed')` (emitted by the settings window after edits) → `loadTabs({preserveActive:true})`.
+7. `loadServiceStatus()` every 30s + on visibilitychange → `tabBar.setStatuses()`.
+8. Window controls: min/max/close/to-maximise-state via `api.window*` (wailsjs runtime).
+9. Keyboard nav: **Ctrl+Tab**/Ctrl+Shift+Tab cycle tabs, **Ctrl+T** open settings,
+   **Ctrl+± / Ctrl+0** zoom the active tab grid (via shellZoom).
+10. **Per-tab display settings** — `settings` map persisted via `api.updateTabSettings`.
+    `zoom` (0.5–2.5) is applied NATIVELY via `api.shellZoom(id, level)` at show time +
+    live; the SettingsModal zoom slider calls the same path.
+11. **Inspector dropdown** (header, right of settings) — `api.inspectorOpen(mode, activeTabId)`
+    with `bottom|right|left|float` and `api.inspectorClose()`; hidden when
+    `api.inspectorAvailable()` is false (non-devtools build).
+
+### Settings window / dedicated page + custom bridge
+`OpenSettings()` (Go) opens a second WebKitWebView with its OWN user content manager
+(NOT the chrome's — see the gotcha below) and loads `wails://wails/settings.html`.
+That page is a **separate vite entry** (`frontend/settings.html` →
+`frontend/src/settings/main.js`) with NO Wails runtime/bindings; it reuses
+`SettingsModal` and reaches Go through a small custom IPC:
+- JS posts `JSON.stringify({id, method, args})` via
+  `window.webkit.messageHandlers.dashboardSettings.postMessage` (handler registered on
+  the settings webview's dedicated ucm in `shell_open_settings`).
+- The C signal `script-message-received::dashboardSettings` → `//export
+  exportSettingsMessage` → `handleSettingsMessage` (settings_bridge.go) dispatches on
+  `App` (package-level `activeApp`, set in main()).
+- Replies come back via `shell_settings_eval` (g_idle → `webkit_web_view_evaluate_javascript`)
+  → `window.__dashReply({id, ok, result|error})`.
+Bridge methods: getTabs/getTheme/getSystemTheme/setTheme/saveTabConfig/removeTab/
+updateTab/updateTabSettings/reorderTabs/tabsChanged/closeSettings/shellZoom.
+- **Frameless**: the window is `gtk_window_set_decorated(FALSE)` like the main app.
+  Dragging is bound to the CARD HEADER, not a strip above it: `settings_drag_press`
+  (button-press-event on the webview) asks the *page* via
+  `webkit_web_view_evaluate_javascript` + `elementFromPoint` whether the press is
+  over the `.modal-header` (walking ancestors; `BUTTON`/`.btn` elements are
+  excluded so the close button stays clickable); only then starts a GTK
+  move-drag (`gtk_window_begin_move_drag`).
+- **Chiudi** closes the whole window: `SettingsModal.close()` → `onClose` →
+  `closeSettings` → `shell_close_settings` destroys the window+ucm (recreated on
+  next open); a `delete-event` instead only hides it.
+- **Not modal, stays on top**: the window is `transient_for` + `keep_above` —
+  deliberately NOT `gtk_window_set_modal` (a modal grab blocks dragging the main
+  window while settings is open). Both windows stay interactive and the card
+  floats above the chrome.
+- **Transparent floating card** (the window is per-pixel transparent, so there
+  is NO window background around the card — the desktop/main-window shows through).
+  The C shim puts the settings window on an RGBA visual (compositor + rgba visual
+  required), marks it `app_paintable` and clears its background in a `draw`
+  handler (`settings_draw_clear`); the settings webview background is cleared via
+  `webkit_web_view_set_background_color`. The page only paints the `.modal` card
+  (`body.settings-mode.dash-transparent { background: transparent }`). The C shim
+  sets `g_settings_transparent` and loads the page with `?t=1` so main.js toggles
+  the class; if the compositor/rgba visual is unavailable the window STAYS opaque
+  and the page keeps its painted `--bg-app` background (the "card on a panel"
+  fallback), so a black void is never exposed. The historical black apron was the
+  opaque window's theme background showing through an un-window-cleared webview.
+- **No black border around the card**: the card's CSS
+  `box-shadow: 0 16px 44px rgba(0,0,0,.5)` renders as a hard BLACK frame around
+  the floating card (over a light desktop it reads as a "black border"), and KWin
+  also draws a shadow around the window's *rectangle* on ARGB windows. Fixed two
+  ways: `body.settings-mode .modal { box-shadow: none }` (settings mode only; the
+  card keeps its crisp 1px border) and `gtk_window_set_type_hint(
+  GDK_WINDOW_TYPE_HINT_UTILITY)` in `settings_enable_transparency` — the standard
+  recipe for frameless transparent popups: KWin drops the decorative shadow while
+  the window stays focusable and (as a transient) above its parent. Verified on
+  the live desktop: the white desktop shows through the ~10px transparent margin
+  with only a faint lightweight shadow.
+- **Content auto-resize**: the page measures the rendered `.modal`
+  (`scheduleFit()` in settings/main.js — 120ms debounce + double-rAF, deduped by
+  size) and reports it to Go via the bridge method `resize` →
+  `settingsResize` → `shell_settings_resize` (`gtk_window_resize` on the GTK
+thread). A **C-side fallback** (`settings_fit_timeout` in tabs_shell.go) probes
+   the same measurement a few times and resizes the window even if the running
+   bundle is too old to have `scheduleFit` (works with any bundle that renders
+   `.modal`). The probe is armed from the settings bridge on the first page
+   message (`getTabs` → `shell_settings_fit_start`), NOT from a WebKit
+   `load-finished` connection — that signal can be emitted on a destroyed
+   webview during teardown and spam `GLib-GObject-CRITICAL: signal
+   'load-finished' is invalid for instance`. `body.settings-mode .modal` has a
+   FIXED width (820px, no `vw`) so the measurement is stable; `.modal-body`
+   scrolls beyond `max-height: 780px`. The overlay keeps a small 10px margin
+   and the card is flush to the top (drag region = card header).
+- **No stale settings bundle across rebuilds**: `main()` calls
+  `clearWebviewResourceCache()` before `wails.Run()` — it removes
+  `<exedir>/data/cache/Dashboard` (WebKit's on-disk HTTP resource cache; the data
+  dir is redirected by `main()`, so *every* reload of `wails://wails/settings.html`
+  serves the freshly embedded `dist/`). Without this, an old bundle could be
+  served after a rebuild (missing `scheduleFit` → oversized/sloppy window). The
+  resource cache is per-run state; websites data (`data/webview`) is untouched.
+- Theme changes in the settings window are broadcast to the chrome via the wails
+  event `shell:theme` (emitted by `SetTheme`; chrome listens in app.js).
 
 ### stores/dashboard.js
 Tiny singleton: `tabs[]`, `lastStatuses[]`, `listeners`, `setTabs/subscribe/notify`,
-`getDefaultTab/setDefaultTab` (localStorage). The panels are NOT rendered through the
-store currently — switchTab in app.js mops the panel lifecycle.
+`getDefaultTab/setDefaultTab` (localStorage). Used by app.js for default tab + statuses;
+tab content itself is native webviews handled by the Go shell.
 
 ### TabBar/TabBar.js (extended)
 - Renders pill tabs (icon + label) with a per-tab status dot; tabs can only be
@@ -210,24 +331,13 @@ store currently — switchTab in app.js mops the panel lifecycle.
 - **Drag & drop** reordering: HTML5 dragstart/dragover/drop on `.tab-bar-item`;
   on drop it re-slices `this.tabs` and calls `onReorder(ids)`.
 - **Context menu** (right click): Rinomina (inline input), Imposta come predefinito,
-  Apri in browser, Duplica, Zoom −/%/+ (keep-open), Reimposta zoom, and a
-  "Barra strumenti" toggle for iframe (URL) tabs. `setDefaultTabId()` marks the default.
+  Apri in browser, Duplica, Zoom −/%/+ (keep-open), Reimposta zoom (toolbar removed
+  with the iframe era). `setDefaultTabId()` marks the default.
+- `setPageTitle(tabId, title)` shows the live page title transiently (ignored while
+  an inline rename is active). `onPopupChange(open)` is called when the context menu
+  opens/closes so app.js can expand/collapse the strip.
 - Tooltips include the URL for non-builtin tabs; labels are `escapeHtml`-encoded.
-- `setTabs(tabs, {persist})`, `setActive(id)`, `setStatuses(statuses)`.
-
-### Panel lifecycle contract (each *Panel.js)
-- `constructor()` — no args; `api` imported directly.
-- `render()` → root element with `#refresh-btn`; `mount(container)` attaches the
-  listener and starts auto-refresh (30s); `unmount()` stops it. (`app.js` uses `refresh`.)
-- `refresh()` → fetch via `api.get*Data()`, render content or `renderError(message)`
-  with `#retry-btn`. All panels: NeuroNet(dashboard-grid), Minecraft, SlotBuilder.
-- `startAutoRefresh` is **idempotent** (guarded by `this.refreshInterval`) so it
-  never spawns duplicate intervals when a tab view is re-shown. Views are mounted
-  once (`panel.mounted` flag in app.js) and only toggled visible/hidden.
-
-### SettingsModal
-Add/edit/remove tabs. Calls `api.saveTabConfig` (=App.AddTabNoContext), `api.updateTab`,
-`api.removeTab`. On save it reloads tabs in app.js. Form fields: label, icon (select), URL.
+- `setTabs(tabs, {persist})`, `setActive(id)`, `setStatuses(statuses)`.`
 
 ## Theming System (IMPORTANT for styling)
 `frontend/src/styles/main.css` defines CSS variables for dark (default) and a
@@ -237,8 +347,9 @@ Add/edit/remove tabs. Calls `api.saveTabConfig` (=App.AddTabNoContext), `api.upd
 - Any new component MUST use these variables, not hardcoded colors.
 - Layout: header (drag region via `--wails-draggable: drag`, interactive elts set
   `data-win="no-drag"`), pill tab bar, grid/card content, modals.
-- Special regions already handled: drag region, `.win-controls`, status pills, URL
-  iframe content, context menu (`--bg-secondary`).
+- Special regions already handled: drag region, `.win-controls`, status pills, context
+  menu (`--bg-secondary`). (Legacy `.panel` / `.url-panel` rules still exist in main.css
+  but are inert — no panel/iframe DOM is rendered anymore.)
 - Scrollbars are custom (`::-webkit-scrollbar`). Light theme has targeted overrides.
 
 ## Frameless Window (KDE Plasma)
@@ -303,7 +414,7 @@ export SLOTBUILDER_TOKEN=xxx
          accumulating/deduping (domain,path,name) into
          `<exedir>/data/webview_cookies.json` (written once per round).
        * `App.OnDomReady` (fired on the GTK main thread via the `load-finished`
-         signal, BEFORE the tab iframes navigate) calls `restoreWebviewCookies()`
+         signal, BEFORE the tab webviews navigate) calls `restoreWebviewCookies()`
          which re-adds those cookies via `webkit_cookie_manager_add_cookie`
          (`soup_cookie_new(...,-1)` = session).
        * `App.Shutdown` runs `snapshotAllWebviewCookies()` to catch last-minute
@@ -311,13 +422,24 @@ export SLOTBUILDER_TOKEN=xxx
      KNOWN LIMITATION: the `httponly` flag is dropped on the add→get roundtrip by
      WebKit (server still receives the cookie — httponly only blocks JS access).
    The app-level cookie jar (`<exedir>/data/cookies.json`) is separate and
-   used by the proxy/panels.
-7. **`ServiceManager`/panel data**: live calls hit real endpoints; if a service is
-   down, refresh shows the error card (per-panel), header pills go offline.
-8. **JS debug → Go log**: `window.runtime.LogPrint`/`LogDebug` do NOT reach
+   used by the proxy/health statuses.
+7. **`ServiceManager` data**: live calls hit real endpoints; if a service is down,
+   header pills go offline (no panels any more).
+8. **DOM popups need strip expansion**: the chrome strip is ~104px, so any DOM popup
+   (tab context menu, inspector dropdown) is clipped. app.js expands the strip to
+   2400px (`expandStrip`) while the popup is open and collapses it on close
+   (`stripExpanded` guard; `syncChromeHeight` is skipped while expanded).
+9. **JS debug → Go log**: `window.runtime.LogPrint`/`LogDebug` do NOT reach
    `dashboard.log`. To debug DOM from JS, use `fmt.Printf`/`log.Printf` in a Go method
    (e.g. temporarily add a `DebugLog` bound method to App), regenerate bindings, and
    call it — `log.SetOutput(f)` sends it to the log file.
+10. **A second webview cannot use Wails IPC** — Wails delivers Go→JS replies only to
+    the MAIN webview (`Frontend.ExecJS` → `webkit_web_view_run_javascript(w.webview)`).
+    A secondary WebKitWebView sharing the chrome's user content manager will hang on
+    `await window.go.main.App.CreateApp()` (blank window). Any extra window MUST use its
+    own webview + ucm and a custom `script-message-received` bridge (see the settings
+    window). Also `webkit_web_view_run_javascript` is deprecated on 2.40+ — use
+    `webkit_web_view_evaluate_javascript`.
 
 ## Debugging Commands
 ```bash
@@ -349,7 +471,7 @@ cat build/bin/data/webview_cookies.json
 ```
 
 ## Build & Run Flow (reliable order)
-1. Edit Go in `main.go`/`internal/...`/`inspector.go`
+1. Edit Go in `main.go`/`tabs_shell.go`/`shell_app.go`/`inspector.go`/`internal/...`
 2. `wails generate module -tags webkit2_41` (only when exported methods/signatures change)
 3. `cd frontend && npm run build` (only when frontend changes)
 4. `wails build -s -tags "webkit2_41 devtools"`

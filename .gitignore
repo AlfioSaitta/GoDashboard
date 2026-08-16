@@ -1,6 +1,7 @@
 # Build output & runtime data
 build/bin/
 build/bin/data/
+/dashboard
 
 # Frontend generated
 frontend/node_modules/

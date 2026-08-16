@@ -65,7 +65,6 @@ export const api = {
 
   async saveTabConfig(config) {
     // config: { id, label, icon, url, enabled }
-    // AddTab takes a single config object
     return wails.AddTabNoContext(config)
   },
 
@@ -79,21 +78,54 @@ export const api = {
   },
 
   async updateTabSettings(tabId, settings) {
-    // settings: { zoom, toolbar, ... } — per-tab display options
+    // settings: { zoom, ... } — per-tab display options
     return wails.UpdateTabSettingsNoContext(String(tabId), settings || {})
+  },
+
+  // ── Native tab shell ──────────────────────────────────
+  async shellShowTab(tabId) {
+    return wails.ShellShowTabNoContext(Number(tabId))
+  },
+
+  async shellDestroyTab(tabId) {
+    return wails.ShellDestroyTabNoContext(Number(tabId))
+  },
+
+  async shellReorder(ids) {
+    return wails.ShellReorderNoContext(ids.map(id => Number(id)))
+  },
+
+  async shellZoom(tabId, level) {
+    return wails.ShellZoomNoContext(Number(tabId), Number(level))
+  },
+
+  async shellSetChromeHeight(height) {
+    return wails.ShellSetChromeHeightNoContext(Number(height))
+  },
+
+  async openSettings() {
+    return wails.OpenSettingsNoContext()
+  },
+
+  async closeSettings() {
+    return wails.CloseSettingsNoContext()
+  },
+
+  async tabsChanged() {
+    return wails.TabsChangedNoContext()
   },
 
   async inspectorAvailable() {
     return wails.InspectorAvailableNoContext()
   },
 
-  async inspectorOpen(mode, url = '') {
-    // mode: 'bottom' | 'right' | 'left' | 'float'; url: page to inspect
-    return wails.InspectorOpenNoContext(mode, url)
+  async inspectorOpen(mode, tabId = 0) {
+    // mode: 'bottom' | 'right' | 'left' | 'float'; tabId: tab whose page to inspect
+    return wails.InspectorOpenNoContext(mode, Number(tabId))
   },
 
-  async inspectorClose() {
-    return wails.InspectorCloseNoContext()
+  async inspectorClose(tabId = 0) {
+    return wails.InspectorCloseNoContext(Number(tabId))
   },
 
   async reorderTabs(ids) {

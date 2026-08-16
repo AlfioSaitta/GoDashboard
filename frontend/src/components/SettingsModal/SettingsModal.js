@@ -1,5 +1,5 @@
 import { createElement, icon, escapeHtml } from '../Shared/utils.js'
-import { serviceForTab, tabZoom } from '../Shared/services.js'
+import { tabZoom } from '../Shared/services.js'
 
 const ICONS = [
   ['brain', 'Cervello (AI/ML)'],
@@ -140,6 +140,8 @@ export class SettingsModal {
     this.hideError()
     this.overlay.querySelector('#add-tab-form').reset()
     this.setFormMode(false)
+    // In the native settings window "close" means closing the window itself.
+    if (this.onClose) this.onClose()
   }
 
   renderTabList() {
@@ -154,7 +156,6 @@ export class SettingsModal {
     list.innerHTML = this.tabs.map((tab, idx) => {
       const settingsOpen = this.settingsTabId === String(tab.id)
       const zoom = Math.round(tabZoom(tab) * 100)
-      const isPanel = !!serviceForTab(tab)
       return `
       <li class="tab-item" data-tab-id="${tab.id}" draggable="true">
         <div class="tab-info">
@@ -193,12 +194,6 @@ export class SettingsModal {
               <button class="btn btn-icon btn-icon-soft zoom-reset" data-tab-id="${tab.id}" aria-label="Reimposta zoom" title="Reimposta zoom">1:1</button>
             </div>
           </div>
-          ${!isPanel ? `
-            <label class="checkbox-row">
-              <input type="checkbox" class="zoom-toolbar" data-tab-id="${tab.id}" ${tab.settings && tab.settings.toolbar ? 'checked' : ''}>
-              <span>Mostra barra strumenti (ricarica e zoom)</span>
-            </label>
-          ` : ''}
         </li>
       ` : ''}
       `
@@ -238,11 +233,6 @@ export class SettingsModal {
       })
       range.addEventListener('change', () => {
         this.applySettings(id, { zoom: Number(range.value) / 100 })
-      })
-    })
-    list.querySelectorAll('.zoom-toolbar').forEach(cb => {
-      cb.addEventListener('change', (e) => {
-        this.applySettings(String(e.currentTarget.dataset.tabId), { toolbar: e.currentTarget.checked })
       })
     })
     list.querySelectorAll('.remove-tab').forEach(btn => {

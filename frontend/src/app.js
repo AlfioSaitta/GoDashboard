@@ -1,21 +1,137 @@
 import { TabBar } from '@/components/TabBar/TabBar.js'
-import { NeuroNetPanel } from '@/components/NeuroNetPanel/NeuroNetPanel.js'
-import { MinecraftPanel } from '@/components/MinecraftPanel/MinecraftPanel.js'
-import { SlotBuilderPanel } from '@/components/SlotBuilderPanel/SlotBuilderPanel.js'
 import { SettingsModal } from '@/components/SettingsModal/SettingsModal.js'
 import { dashboardStore } from '@/stores/dashboard.js'
 import { api } from '@/services/api.js'
-import { createElement, icon } from '@/components/Shared/utils.js'
-import { serviceForTab, urlForTab as resolveUrlForTab } from '@/components/Shared/services.js'
+import { icon } from '@/components/Shared/utils.js'
+import { urlForTab } from '@/components/Shared/services.js'
+import * as runtime from '../wailsjs/runtime/runtime.js'
+
+const ZOOM_MIN = 0.5
+const ZOOM_MAX = 2.5
+const ZOOM_STEP = 0.1
+
+function clampZoom(z) {
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 10) / 10))
+}
+
+function zoomOf(tab) {
+  const z = tab && tab.settings ? Number(tab.settings.zoom) : NaN
+  return Number.isFinite(z) ? clampZoom(z) : 1
+}
+
+// ── Theme ────────────────────────────────────────────────
+let currentThemePref = 'system'
+
+function applyThemePref(pref) {
+  currentThemePref = ['system', 'dark', 'light'].includes(pref) ? pref : 'system'
+  if (currentThemePref === 'system') {
+    return api.getSystemTheme()
+      .then(sys => {
+        document.documentElement.dataset.theme = sys === 'light' ? 'light' : 'dark'
+      })
+      .catch(() => {
+        document.documentElement.dataset.theme = 'dark'
+      })
+  }
+  document.documentElement.dataset.theme = currentThemePref === 'light' ? 'light' : 'dark'
+  return Promise.resolve()
+}
+
+async function applyTheme() {
+  try {
+    currentThemePref = await api.getTheme()
+  } catch { /* keep default */ }
+  return applyThemePref(currentThemePref)
+}
 
 export async function createApp() {
+  const settingsView = window.location.hash === '#settings'
+  if (settingsView) {
+    await mountSettingsView()
+    return
+  }
+  await mountChrome()
+}
+
+// ── Impostazioni: rendered as the WHOLE content of the native settings
+// window (the app bundle is loaded with "#settings").
+async function mountSettingsView() {
+  try {
+    await applyTheme()
+  } catch { /* keep default */ }
+
+  const app = document.getElementById('app')
+  app.innerHTML = '<div id="settings-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="settings-title"></div>'
+  document.body.classList.add('settings-mode')
+
+  const refreshList = async () => {
+    try {
+      settingsModal.open(await api.getTabs())
+    } catch { /* keep list */ }
+  }
+
+  const settingsModal = new SettingsModal(document.getElementById('settings-modal'), {
+    onSave: async (config) => {
+      await api.saveTabConfig(config)
+      api.tabsChanged().catch(() => {})
+      await refreshList()
+    },
+    onUpdateTab: async (tabId, config) => {
+      await api.updateTab(tabId, config)
+      api.tabsChanged().catch(() => {})
+      await refreshList()
+    },
+    onRemoveTab: async (tabId) => {
+      await api.removeTab(tabId)
+      api.tabsChanged().catch(() => {})
+      await refreshList()
+    },
+    onReorder: async (ids) => {
+      try {
+        await api.reorderTabs(ids)
+        api.tabsChanged().catch(() => {})
+      } catch (error) {
+        console.error('Failed to reorder tabs:', error)
+      }
+    },
+    onThemeChange: async (theme) => {
+      try {
+        await api.setTheme(theme)
+        await applyThemePref(theme)
+      } catch (error) {
+        console.error('Failed to save theme:', error)
+      }
+    },
+    onUpdateSettings: async (tabId, settings) => {
+      try {
+        if (settings && typeof settings.zoom === 'number') {
+          api.shellZoom(tabId, settings.zoom).catch(() => {})
+        }
+        await api.updateTabSettings(tabId, settings)
+      } catch (error) {
+        console.error('Failed to save tab settings:', error)
+      }
+    },
+    onClose: async () => {
+      try { await api.closeSettings() } catch { /* noop */ }
+    },
+  })
+
+  const tabs = await api.getTabs()
+  settingsModal.setTheme(currentThemePref)
+  settingsModal.open(tabs || [])
+}
+
+// ── Chrome strip: header + tab bar only. Each tab is a native webview
+// managed by the Go shell (see tabs_shell.go / ShellShowTab).
+async function mountChrome() {
   try {
     await applyTheme()
   } catch { /* keep default */ }
 
   const app = document.getElementById('app')
   app.innerHTML = `
-    <div class="dashboard">
+    <div class="dashboard strip">
       <header class="dashboard-header">
         <div class="header-left">
           <div class="brand-mark">
@@ -65,62 +181,64 @@ export async function createApp() {
         </div>
       </header>
       <nav class="tab-bar" id="tab-bar"></nav>
-      <main class="dashboard-content" id="dashboard-content"></main>
     </div>
-    <div id="settings-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="settings-title"></div>
   `
 
-  const contentEl = document.getElementById('dashboard-content')
-  let activePanelTabId = null
+  let currentTabId = null
+  let stripHeight = 104
+  let stripExpanded = false
+  const knownTabIds = new Set()
 
-  // ── Per-tab display settings (zoom, toolbar) ────────────
-  const ZOOM_MIN = 0.5
-  const ZOOM_MAX = 2.5
-  const ZOOM_STEP = 0.1
-
-  function clampZoom(z) {
-    return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 10) / 10))
+  // ── Chrome strip height (the Go shell sizes the chrome webview exactly to
+  // header + tab bar, leaving the rest of the window to the tab stack).
+  let heightSyncTimer = null
+  function measureStripHeight() {
+    const bar = document.getElementById('tab-bar')
+    if (!bar) return stripHeight
+    return Math.max(60, Math.ceil(bar.getBoundingClientRect().bottom) + 2)
   }
 
-  function zoomOf(tab) {
-    const z = tab && tab.settings ? Number(tab.settings.zoom) : NaN
-    return Number.isFinite(z) ? clampZoom(z) : 1
+  async function applyChromeHeight(h) {
+    if (stripExpanded) return
+    stripHeight = h || measureStripHeight()
+    api.shellSetChromeHeight(stripHeight).catch(() => {})
   }
 
-  // Applies the stored per-tab settings to an existing (kept-alive) view.
-  function applyViewSettings(view, tab) {
-    if (!view || !view.el) return
-    view.el.style.zoom = String(zoomOf(tab))
-    view.el.classList.toggle('has-toolbar', !view.panel && !!(tab.settings && tab.settings.toolbar))
-    if (view.toolbarRef) view.toolbarRef.updateZoom(zoomOf(tab))
+  function syncChromeHeight() {
+    if (stripExpanded) return
+    clearTimeout(heightSyncTimer)
+    heightSyncTimer = setTimeout(() => applyChromeHeight(), 30)
   }
 
-  // Merges a settings patch into a tab: updates the store, applies it right
-  // away on the live view and persists it on the backend.
-  async function updateTabSettings(tab, settings) {
-    const sel = dashboardStore.getTabs().find(t => String(t.id) === String(tab.id))
-    if (sel) sel.settings = settings
-    tab.settings = settings
-    const view = viewCache.get(String(tab.id))
-    if (view) applyViewSettings(view, tab)
-    try {
-      await api.updateTabSettings(tab.id, settings)
-    } catch (error) {
-      console.error('Failed to save tab settings:', error)
-    }
+  // Temporarily grow the chrome webview so DOM popups (context menu, inspector
+  // dropdown) are not clipped by the thin strip; shrink back once they close.
+  function expandStrip() {
+    if (stripExpanded) return
+    stripExpanded = true
+    api.shellSetChromeHeight(2400).catch(() => {})
+  }
+
+  function collapseStrip() {
+    if (!stripExpanded) return
+    stripExpanded = false
+    api.shellSetChromeHeight(stripHeight).catch(() => {})
   }
 
   function setTabZoom(tab, z) {
     const current = (tab.settings && typeof tab.settings === 'object') ? tab.settings : {}
-    return updateTabSettings(tab, { ...current, zoom: clampZoom(z) })
+    const merged = { ...current, zoom: clampZoom(z) }
+    tab.settings = merged
+    api.shellZoom(tab.id, clampZoom(z)).catch(() => {})
+    api.updateTabSettings(tab.id, merged).catch(err => console.error('Failed to save tab settings:', err))
   }
 
   const tabBar = new TabBar(document.getElementById('tab-bar'), {
     onTabChange: switchTab,
-    onAddTab: openSettings,
+    onAddTab: () => api.openSettings().catch(() => {}),
     onReorder: async (ids) => {
       try {
         await api.reorderTabs(ids)
+        api.shellReorder(ids).catch(() => {})
         await loadTabs({ preserveActive: true })
       } catch (error) {
         console.error('Failed to reorder tabs:', error)
@@ -131,7 +249,9 @@ export async function createApp() {
       tabBar.setDefaultTabId(tabId)
     },
     onOpenExternal: (tab) => {
-      const url = urlForTab(tab)
+      // Context menu on the (expanded) strip: the page is a native webview, so
+      // the transitory URL shown is the resolved one.
+      const url = resolveUrlForTooltip(tab)
       if (url) api.openExternal(url).catch(err => console.error('Failed to open URL:', err))
     },
     onRenameTab: async (tabId, label) => {
@@ -154,54 +274,23 @@ export async function createApp() {
     },
     onZoom: (tab, delta) => setTabZoom(tab, zoomOf(tab) + delta),
     onResetZoom: (tab) => setTabZoom(tab, 1),
-    onToggleToolbar: async (tab) => {
-      const current = (tab.settings && typeof tab.settings === 'object') ? tab.settings : {}
-      await updateTabSettings(tab, { ...current, toolbar: !current.toolbar })
-    },
+    onPopupChange: (open) => { if (open) expandStrip(); else collapseStrip() },
   })
 
-  const panels = {
-    neuronet: new NeuroNetPanel(),
-    minecraft: new MinecraftPanel(),
-    slotbuilder: new SlotBuilderPanel(),
-  }
+  // Native webviews report their page title; show it transiently on the tab.
+  runtime.EventsOn('shell:title', (data) => {
+    if (!data || data.tabId == null) return
+    tabBar.setPageTitle(String(data.tabId), data.title)
+  })
 
-  const settingsModal = new SettingsModal(document.getElementById('settings-modal'), {
-    onSave: async (config) => {
-      await api.saveTabConfig(config)
-      await loadTabs()
-    },
-    onUpdateTab: async (tabId, config) => {
-      await api.updateTab(tabId, config)
-      await loadTabs()
-    },
-    onRemoveTab: async (tabId) => {
-      await api.removeTab(tabId)
-      await loadTabs()
-    },
-    onReorder: async (ids) => {
-      try {
-        await api.reorderTabs(ids)
-        await loadTabs({ preserveActive: true })
-      } catch (error) {
-        console.error('Failed to reorder tabs:', error)
-      }
-    },
-    onThemeChange: async (theme) => {
-      try {
-        await api.setTheme(theme)
-        await applyThemeUI(theme)
-      } catch (error) {
-        console.error('Failed to save theme:', error)
-      }
-    },
-    onUpdateSettings: async (tabId, patch) => {
-      const tab = dashboardStore.getTabs().find(t => String(t.id) === String(tabId))
-      if (!tab) return
-      const current = (tab.settings && typeof tab.settings === 'object') ? tab.settings : {}
-      await updateTabSettings(tab, { ...current, ...patch })
-    },
-    onClose: closeSettings,
+  // The Impostazioni window notifies us whenever the tab list changed.
+  runtime.EventsOn('tabs:changed', () => {
+    loadTabs({ preserveActive: true }).catch(() => {})
+  })
+
+  // The Impostazioni window applies a new theme preference.
+  runtime.EventsOn('shell:theme', (theme) => {
+    applyThemePref(theme).catch(() => {})
   })
 
   let serviceStatusBusy = false
@@ -226,183 +315,72 @@ export async function createApp() {
     document.addEventListener('visibilitychange', poll)
   }
 
+  function switchTab(tabId) {
+    const tab = dashboardStore.getTabs().find(t => String(t.id) === String(tabId))
+    if (!tab) {
+      currentTabId = null
+      tabBar.setActive(null)
+      return
+    }
+    currentTabId = tab.id
+    tabBar.setActive(tab.id)
+    api.shellShowTab(tab.id).catch(err => console.error('Failed to show tab:', err))
+  }
+
   async function loadTabs({ preserveActive = false } = {}) {
     try {
       const tabs = await api.getTabs()
       const list = tabs || []
-      const previousActive = activePanelTabId
 
       dashboardStore.setTabs(list)
       tabBar.setStatuses(dashboardStore.lastStatuses || [])
       tabBar.setTabs(list)
       tabBar.setDefaultTabId(dashboardStore.getDefaultTab())
 
-      // Drop cached views for tabs that no longer exist, so removed tabs free
-      // their iframes/sessions instead of lingering in the DOM.
+      // Destroy the native webviews of removed tabs (their session is gone).
       const alive = new Set(list.map(t => String(t.id)))
-      viewCache.forEach((view, tabId) => {
-        if (!alive.has(String(tabId))) destroyView(view, tabId)
+      knownTabIds.forEach(id => {
+        if (!alive.has(id)) {
+          api.shellDestroyTab(id).catch(() => {})
+          knownTabIds.delete(id)
+        }
       })
+      list.forEach(t => knownTabIds.add(String(t.id)))
 
       if (list.length > 0) {
         let target
-        if (preserveActive && previousActive != null &&
-            alive.has(String(previousActive))) {
-          target = previousActive
+        if (preserveActive && currentTabId != null && alive.has(String(currentTabId))) {
+          target = currentTabId
         } else {
           const defaultTabId = dashboardStore.getDefaultTab()
           target = list.find(t => String(t.id) === String(defaultTabId)) ? defaultTabId : list[0].id
         }
         switchTab(target)
       } else {
-        showEmptyState()
+        currentTabId = null
+        tabBar.setActive(null)
       }
     } catch (error) {
       console.error('Failed to load tabs:', error)
-      showEmptyState(error.message)
+      currentTabId = null
+      tabBar.setActive(null)
     }
   }
 
-function panelForTab(tab) {
-  if (!tab) return null
-  const svc = serviceForTab(tab)
-  if (!svc) return null
-  return panels[svc.id] || null
-}
-
-function urlForTab(tab) {
-  return resolveUrlForTab(tab)
-}
-
-  // Tab views are kept alive once created. Switching only toggles visibility,
-  // so iframes keep their browsing context (login/session/cookies) intact.
-  const viewCache = new Map() // tabId -> { el, panel }
-  let currentViewId = null
-
-  function switchTab(tabId) {
-    const tab = dashboardStore.getTabs().find(t => String(t.id) === String(tabId))
-
-    if (currentViewId != null && viewCache.has(String(currentViewId))) {
-      const prev = viewCache.get(String(currentViewId))
-      prev.el.classList.remove('active')
-      if (prev.panel) prev.panel.stopAutoRefresh()
-    }
-
-    if (tab) {
-      const view = ensureView(tab)
-      applyViewSettings(view, tab)
-      view.el.classList.add('active')
-      if (view.panel) view.panel.startAutoRefresh()
-      currentViewId = tab.id
-      activePanelTabId = tab.id
-    } else {
-      currentViewId = null
-      activePanelTabId = null
-      hideAllViews()
-      contentEl.innerHTML = '<div class="empty-state">Tab non disponibile</div>'
-    }
-
-    tabBar.setActive(tab ? tab.id : null)
+  function resolveUrlForTooltip(tab) {
+    return urlForTab(tab)
   }
 
-  function hideAllViews() {
-    viewCache.forEach(v => {
-      v.el.classList.remove('active')
-      if (v.panel) v.panel.stopAutoRefresh()
-    })
+  // ── Factory glue: computed label of the active tab for the inspector. ──
+  function activeTab() {
+    return dashboardStore.getTabs().find(t => String(t.id) === String(currentTabId)) || null
   }
 
-  function viewKey(tab) {
-    const panel = panelForTab(tab)
-    return panel ? `panel` : `url:${tab.url}`
-  }
+  document.getElementById('settings-btn').addEventListener('click', () => {
+    api.openSettings().catch(() => {})
+  })
 
-  function ensureView(tab) {
-    let view = viewCache.get(String(tab.id))
-    if (view && view.key === viewKey(tab)) {
-      return view
-    }
-    if (view) destroyView(view, String(tab.id))
-
-    view = { el: null, panel: null, key: viewKey(tab) }
-    const panel = panelForTab(tab)
-    if (panel) {
-      if (!panel.element) panel.render()
-      view.el = panel.element
-      view.panel = panel
-      if (!panel.mounted) {
-        panel.mounted = true
-        panel.mount(contentEl)
-        panel.refresh()
-      }
-    } else {
-      const settings = (tab.settings && typeof tab.settings === 'object') ? tab.settings : {}
-      view.el = createElement(`
-        <div class="panel url-panel${settings.toolbar ? ' has-toolbar' : ''}">
-          <div class="url-toolbar">
-            <button class="btn btn-icon url-reload" title="Ricarica" aria-label="Ricarica">${icon('refresh', 14)}</button>
-            <span class="url-toolbar-spacer"></span>
-            <button class="btn btn-icon url-zoom-out" title="Diminuisci zoom" aria-label="Diminuisci zoom">${icon('minus', 14)}</button>
-            <span class="url-zoom-label">100%</span>
-            <button class="btn btn-icon url-zoom-in" title="Aumenta zoom" aria-label="Aumenta zoom">${icon('plus', 14)}</button>
-            <button class="btn btn-icon url-zoom-reset" title="Reimposta zoom" aria-label="Reimposta zoom">${icon('reset', 14)}</button>
-          </div>
-          <div class="panel-content">
-            <iframe class="tab-frame" src="${tab.url}" title="${tab.label}"></iframe>
-          </div>
-        </div>
-      `)
-      const frame = view.el.querySelector('.tab-frame')
-      view.el.querySelector('.url-reload').addEventListener('click', () => { frame.src = frame.src })
-      const zoomLabel = view.el.querySelector('.url-zoom-label')
-      view.el.querySelector('.url-zoom-out').addEventListener('click', () => setTabZoom(tab, zoomOf(tab) - ZOOM_STEP))
-      view.el.querySelector('.url-zoom-in').addEventListener('click', () => setTabZoom(tab, zoomOf(tab) + ZOOM_STEP))
-      view.el.querySelector('.url-zoom-reset').addEventListener('click', () => setTabZoom(tab, 1))
-      view.toolbarRef = {
-        updateZoom: (z) => { zoomLabel.textContent = `${Math.round(z * 100)}%` },
-      }
-    }
-
-    contentEl.appendChild(view.el)
-    viewCache.set(String(tab.id), view)
-    return view
-  }
-
-  function destroyView(view, tabId) {
-    viewCache.delete(String(tabId))
-    if (view.panel) view.panel.stopAutoRefresh()
-    if (view.el && view.el.parentNode === contentEl) {
-      contentEl.removeChild(view.el)
-    }
-  }
-
-  function showEmptyState(message) {
-    hideAllViews()
-    contentEl.innerHTML = ''
-    const empty = document.createElement('div')
-    empty.className = 'empty-state'
-    empty.innerHTML = `
-      <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-        <rect x="2" y="3" width="20" height="14" rx="2"></rect>
-        <path d="M8 21h8"></path>
-        <path d="M12 17v4"></path>
-      </svg>
-      <h2>Nessun tab configurato</h2>
-      <p>${message || 'Apri le impostazioni per aggiungere i tuoi servizi'}</p>
-      <button class="btn btn-primary" id="empty-settings-btn">Apri Impostazioni</button>
-    `
-    contentEl.appendChild(empty)
-    document.getElementById('empty-settings-btn')?.addEventListener('click', openSettings)
-    tabBar.setActive(null)
-  }
-
-  function closeSettings() {
-    settingsModal.close()
-  }
-
-  document.getElementById('settings-btn').addEventListener('click', openSettings)
-
-  // ── Inspector dropdown ──────────────────────────────────
+  // ── Inspector dropdown (page of the ACTIVE tab, mode selectable) ──────
   const INSPECTOR_MODES = [
     { mode: 'bottom', label: 'Aggancia in basso', icon: 'chevronDown' },
     { mode: 'right', label: 'Aggancia a destra', icon: 'layers' },
@@ -422,20 +400,11 @@ function urlForTab(tab) {
     inspectorMenu.querySelectorAll('.ctx-item').forEach(btn => {
       btn.addEventListener('click', async () => {
         const mode = btn.dataset.mode
-        // Inspect the PAGE of the active tab (service admin URL for built-in
-        // panels, the iframe URL for URL tabs) via a dedicated webview.
-        const activeTab = dashboardStore.getTabs()
-          .find(t => String(t.id) === String(activePanelTabId))
-        const url = urlForTab(activeTab) || ''
+        const tab = activeTab()
+        const tabId = tab ? tab.id : 0
         try {
-          if (mode === 'close') await api.inspectorClose()
-          else {
-            if (!url) {
-              console.warn('Nessun URL ispezionabile per il tab attivo:', activeTab && activeTab.label)
-            } else {
-              await api.inspectorOpen(mode, url)
-            }
-          }
+          if (mode === 'close') await api.inspectorClose(tabId)
+          else await api.inspectorOpen(mode, tabId)
         } catch (error) {
           console.error('Inspector action failed:', error)
         }
@@ -448,6 +417,7 @@ function urlForTab(tab) {
     inspectorMenu.hidden = true
     document.removeEventListener('click', onInspectorDocClick)
     document.removeEventListener('keydown', onInspectorKeyDown)
+    collapseStrip()
   }
 
   const onInspectorDocClick = (e) => {
@@ -464,6 +434,7 @@ function urlForTab(tab) {
       hideInspectorMenu()
       return
     }
+    expandStrip()
     renderInspectorMenu()
     inspectorMenu.hidden = false
     const rect = inspectorMenu.getBoundingClientRect()
@@ -500,47 +471,13 @@ function urlForTab(tab) {
   loadServiceStatus()
   scheduleStatusPoll()
 
-  let currentThemePref = 'system'
-
-  async function applyTheme() {
-    try {
-      currentThemePref = await api.getTheme()
-    } catch { /* keep default */ }
-    return applyThemePref(currentThemePref)
-  }
-
-  function applyThemePref(pref) {
-    currentThemePref = ['system', 'dark', 'light'].includes(pref) ? pref : 'system'
-    if (currentThemePref === 'system') {
-      return api.getSystemTheme()
-        .then(sys => {
-          document.documentElement.dataset.theme = sys === 'light' ? 'light' : 'dark'
-        })
-        .catch(() => {
-          document.documentElement.dataset.theme = 'dark'
-        })
-    }
-    document.documentElement.dataset.theme = currentThemePref === 'light' ? 'light' : 'dark'
-    return Promise.resolve()
-  }
-
-  // Applies a preference picked from the Settings modal UI directly.
-  function applyThemeUI(pref) {
-    return applyThemePref(pref)
-  }
-
-  function openSettings() {
-    settingsModal.setTheme(currentThemePref)
-    settingsModal.open(dashboardStore.getTabs())
-  }
-
   document.addEventListener('keydown', (e) => {
     const ctrl = e.ctrlKey || e.metaKey
     if (!ctrl) return
     const tabs = dashboardStore.getTabs()
     if (tabs.length === 0) return
 
-    const activeIdx = tabs.findIndex(t => String(t.id) === String(activePanelTabId))
+    const activeIdx = tabs.findIndex(t => String(t.id) === String(currentTabId))
 
     if (e.key === 'Tab') {
       e.preventDefault()
@@ -550,7 +487,7 @@ function urlForTab(tab) {
       switchTab(tabs[nextIdx].id)
     } else if (e.key.toLowerCase() === 't' && !e.shiftKey) {
       e.preventDefault()
-      openSettings()
+      api.openSettings().catch(() => {})
     } else if (e.key === '=' || e.key === '+' || e.key === '-' || e.key === '_' || e.key === '0') {
       const activeTab = tabs[activeIdx]
       if (!activeTab) return
@@ -562,17 +499,6 @@ function urlForTab(tab) {
   })
 
   await loadTabs()
-
-  // Pause/resume the visible panel's auto-refresh when the window is hidden,
-  // saving network traffic and CPU while the user is away.
-  document.addEventListener('visibilitychange', () => {
-    const view = currentViewId != null ? viewCache.get(String(currentViewId)) : null
-    if (!view || !view.panel) return
-    if (document.hidden) {
-      view.panel.stopAutoRefresh()
-    } else {
-      view.panel.refresh()
-      view.panel.startAutoRefresh()
-    }
-  })
+  syncChromeHeight()
+  window.addEventListener('resize', syncChromeHeight)
 }

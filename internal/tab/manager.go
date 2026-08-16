@@ -64,6 +64,18 @@ func (tm *TabManager) List() []Tab {
 	return out
 }
 
+// Get returns the tab with the given id.
+func (tm *TabManager) Get(id int) (Tab, bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	for _, t := range tm.tabs {
+		if t.ID == id {
+			return t, true
+		}
+	}
+	return Tab{}, false
+}
+
 func (tm *TabManager) Add(url, title string) Tab {
 	return tm.AddWithIcon(url, title, "")
 }

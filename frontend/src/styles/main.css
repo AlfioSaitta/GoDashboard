@@ -1292,6 +1292,44 @@ button:focus:not(:focus-visible) {
   display: flex;
 }
 
+/* The Impostazioni window is a frameless floating card (no native decorations).
+ *
+ * When the C shim can make the window per-pixel transparent (compositor + RGBA
+ * visual available), the page must NOT paint a full-window background: only the
+ * .modal card is drawn and the desktop shows through around it. The shim loads
+ * the page with "?t=1" in that case and main.js toggles `.dash-transparent`.
+ *
+ * Otherwise the window is opaque and the page falls back to painting the whole
+ * surface with the app background, so the card never sits on GTK's black void.
+ * The page measures the rendered .modal and reports it to Go via the "resize"
+ * bridge method so the window hugs the card either way. */
+body.settings-mode {
+  background: var(--bg-app) radial-gradient(1100px 480px at 50% -12%, rgba(79, 141, 255, 0.08), transparent 60%);
+}
+
+body.settings-mode.dash-transparent {
+  background: transparent;
+}
+
+body.settings-mode .modal {
+  width: 820px;
+  max-height: 780px;
+  /* No card shadow here: on the transparent window a big black box-shadow
+   * reads as a "black border" around the card over the desktop. */
+  box-shadow: none;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+body.settings-mode .modal-overlay {
+  background: transparent;
+  backdrop-filter: none;
+  /* Card flush to the top: the drag region is the CARD HEADER itself (the C
+   * shim asks the page which element was pressed, see tabs_shell.go). The
+   * overlay only leaves a small breathing margin. */
+  padding: 10px;
+  align-items: flex-start;
+}
+
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -1322,6 +1360,8 @@ button:focus:not(:focus-visible) {
   padding: 1rem 1.25rem;
   border-bottom: 1px solid var(--border);
   background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+  user-select: none;
+  -webkit-user-select: none;
 }
 
 .modal-header h2 {

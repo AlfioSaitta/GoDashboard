@@ -10,6 +10,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         index: path.resolve(__dirname, 'index.html'),
+        settings: path.resolve(__dirname, 'settings.html'),
       },
     },
     target: 'es2020',
@@ -28,7 +29,13 @@ export default defineConfig({
   plugins: [
     {
       name: 'inline-script',
-      transformIndexHtml(html) {
+      transformIndexHtml(html, ctx) {
+        // Only the main page (index.html) needs the Wails CreateApp bootstrap.
+        // settings.html runs without the Wails runtime (custom message bridge).
+        const filename = ctx && ctx.filename ? ctx.filename.replace(/\\/g, '/') : ''
+        if (!filename.endsWith('/index.html')) {
+          return html
+        }
         return html.replace(
           '</body>',
           `<script>
