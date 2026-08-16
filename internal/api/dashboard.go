@@ -127,7 +127,7 @@ func (t *TabAPI) ListTabs(ctx context.Context) ([]TabInfo, error) {
 	}
 	result := make([]TabInfo, len(tabs))
 	for i, tb := range tabs {
-		result[i] = TabInfo{ID: tb.ID, Label: tb.Title, Icon: tb.Icon, URL: tb.URL, Settings: tb.Settings}
+		result[i] = TabInfo{ID: tb.ID, Label: tb.Title, Icon: tb.Icon, URL: tb.URL, Notes: tb.Notes, Settings: tb.Settings}
 	}
 	log.Printf("TabAPI.ListTabs: returning %d tabs", len(result))
 	return result, nil
@@ -145,7 +145,7 @@ func (t *TabAPI) UpdateTab(ctx context.Context, id string, config map[string]int
 		return Tab{}, fmt.Errorf("tab %d not found", intID)
 	}
 	log.Printf("TabAPI.UpdateTab: updated tab %d", intID)
-	return Tab{ID: tab.ID, Title: tab.Title, URL: tab.URL, Icon: tab.Icon, Settings: tab.Settings}, nil
+	return Tab{ID: tab.ID, Title: tab.Title, URL: tab.URL, Icon: tab.Icon, Notes: tab.Notes, Settings: tab.Settings}, nil
 }
 
 // UpdateTabSettings replaces the per-tab display settings (zoom, toolbar, ...).
@@ -162,7 +162,34 @@ func (t *TabAPI) UpdateTabSettings(ctx context.Context, id string, settings map[
 		return Tab{}, fmt.Errorf("tab %d not found", intID)
 	}
 	log.Printf("TabAPI.UpdateTabSettings: tab %d settings updated", intID)
-	return Tab{ID: tb.ID, Title: tb.Title, URL: tb.URL, Icon: tb.Icon, Settings: tb.Settings}, nil
+	return Tab{ID: tb.ID, Title: tb.Title, URL: tb.URL, Icon: tb.Icon, Notes: tb.Notes, Settings: tb.Settings}, nil
+}
+
+// GetNotes returns the persistent notes of the tab identified by id.
+func (t *TabAPI) GetNotes(ctx context.Context, id string) (string, error) {
+	intID, err := strconv.Atoi(id)
+	if err != nil {
+		return "", fmt.Errorf("invalid tab id %q", id)
+	}
+	tb, ok := t.manager.Get(intID)
+	if !ok {
+		return "", fmt.Errorf("tab %d not found", intID)
+	}
+	return tb.Notes, nil
+}
+
+// SaveNotes sets the persistent notes of the tab identified by id.
+func (t *TabAPI) SaveNotes(ctx context.Context, id string, notes string) (Tab, error) {
+	intID, err := strconv.Atoi(id)
+	if err != nil {
+		return Tab{}, fmt.Errorf("invalid tab id %q", id)
+	}
+	tb, ok := t.manager.SetNotes(intID, notes)
+	if !ok {
+		return Tab{}, fmt.Errorf("tab %d not found", intID)
+	}
+	log.Printf("TabAPI.SaveNotes: tab %d notes saved (%d bytes)", intID, len(notes))
+	return Tab{ID: tb.ID, Title: tb.Title, URL: tb.URL, Icon: tb.Icon, Notes: tb.Notes, Settings: tb.Settings}, nil
 }
 
 // ReorderTabs reorders tabs to match the order of the provided ids.
@@ -187,6 +214,7 @@ type TabInfo struct {
 	Label    string                 `json:"label"`
 	Icon     string                 `json:"icon"`
 	URL      string                 `json:"url"`
+	Notes    string                 `json:"notes,omitempty"`
 	Settings map[string]interface{} `json:"settings,omitempty"`
 }
 
@@ -195,6 +223,7 @@ type Tab struct {
 	Title    string                 `json:"title"`
 	URL      string                 `json:"url"`
 	Icon     string                 `json:"icon,omitempty"`
+	Notes    string                 `json:"notes,omitempty"`
 	Settings map[string]interface{} `json:"settings,omitempty"`
 }
 

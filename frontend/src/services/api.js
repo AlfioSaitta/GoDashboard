@@ -82,6 +82,14 @@ export const api = {
     return wails.UpdateTabSettingsNoContext(String(tabId), settings || {})
   },
 
+  async getNotes(tabId) {
+    return wails.GetNotesNoContext(String(tabId))
+  },
+
+  async saveNotes(tabId, notes) {
+    return wails.SaveNotesNoContext(String(tabId), notes || '')
+  },
+
   // ── Native tab shell ──────────────────────────────────
   async shellShowTab(tabId) {
     return wails.ShellShowTabNoContext(Number(tabId))
@@ -109,6 +117,15 @@ export const api = {
 
   async closeSettings() {
     return wails.CloseSettingsNoContext()
+  },
+
+  // Dedicated notes editor window (floating, non-modal — main window stays usable).
+  async openNotes(tabId) {
+    return wails.OpenNotesNoContext(Number(tabId))
+  },
+
+  async closeNotes() {
+    return wails.CloseNotesNoContext()
   },
 
   async tabsChanged() {

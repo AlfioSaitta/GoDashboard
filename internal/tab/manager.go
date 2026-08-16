@@ -21,6 +21,7 @@ type Tab struct {
 	Title    string                 `json:"title"`
 	URL      string                 `json:"url"`
 	Icon     string                 `json:"icon,omitempty"`
+	Notes    string                 `json:"notes,omitempty"`
 	Settings map[string]interface{} `json:"settings,omitempty"`
 }
 
@@ -104,7 +105,7 @@ func (tm *TabManager) Update(id int, url, title, icon string) (Tab, bool) {
 			if url == "" {
 				url = t.URL
 			}
-			tm.tabs[i] = Tab{ID: t.ID, Title: title, URL: url, Icon: icon, Settings: t.Settings}
+			tm.tabs[i] = Tab{ID: t.ID, Title: title, URL: url, Icon: icon, Notes: t.Notes, Settings: t.Settings}
 			tm.save()
 			return tm.tabs[i], true
 		}
@@ -132,6 +133,21 @@ func (tm *TabManager) SetSettings(id int, settings map[string]interface{}) (Tab,
 	for i, t := range tm.tabs {
 		if t.ID == id {
 			t.Settings = settings
+			tm.tabs[i] = t
+			tm.save()
+			return tm.tabs[i], true
+		}
+	}
+	return Tab{}, false
+}
+
+// SetNotes sets the persistent notes of the tab identified by id.
+func (tm *TabManager) SetNotes(id int, notes string) (Tab, bool) {
+	tm.mu.Lock()
+	defer tm.mu.Unlock()
+	for i, t := range tm.tabs {
+		if t.ID == id {
+			t.Notes = notes
 			tm.tabs[i] = t
 			tm.save()
 			return tm.tabs[i], true

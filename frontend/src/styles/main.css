@@ -266,7 +266,7 @@ button:focus:not(:focus-visible) {
 .tab-status-dot {
   position: absolute;
   top: 0.35rem;
-  right: 0.55rem;
+  right: 1.35rem;
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -282,6 +282,48 @@ button:focus:not(:focus-visible) {
 .tab-status-dot.offline {
   background: var(--danger);
   box-shadow: 0 0 6px rgba(255, 92, 122, 0.6);
+}
+
+/* Per-tab persistent-notes access button (next to the pill) */
+
+.tab-note-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: -2px;
+  padding: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  border: none;
+  border-radius: 9999px;
+  cursor: pointer;
+  opacity: 0.55;
+  flex-shrink: 0;
+  transition: all var(--transition);
+}
+
+.tab-note-btn svg {
+  pointer-events: none;
+}
+
+.tab-bar-item:hover .tab-note-btn {
+  opacity: 1;
+}
+
+.tab-note-btn:hover {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
+.tab-note-btn.has-note {
+  opacity: 1;
+  color: var(--warning);
+}
+
+.tab-note-btn.has-note:hover {
+  color: var(--accent);
 }
 
 /* Drag & drop */
@@ -419,6 +461,145 @@ button:focus:not(:focus-visible) {
   border-radius: var(--radius);
   box-shadow: var(--shadow-lg);
   animation: fadeIn 120ms ease;
+}
+
+/* ── Persistent notes editor (chrome strip) ─────────────── */
+
+.notes-host {
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.notes-overlay {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 64px 20px 20px;
+  background: rgba(4, 6, 10, 0.35);
+  pointer-events: auto;
+}
+
+.notes-overlay.open {
+  display: flex;
+  animation: fadeIn 140ms ease;
+}
+
+.notes-card {
+  width: 460px;
+  max-width: 100%;
+  max-height: min(720px, calc(100vh - 90px));
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: modalIn 200ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.notes-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.85rem 1rem 0.85rem 1.2rem;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent);
+  user-select: none;
+  -webkit-user-select: none;
+  flex-shrink: 0;
+}
+
+.notes-header h2 {
+  font-size: 0.95rem;
+  font-weight: 650;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  letter-spacing: -0.01em;
+}
+
+.notes-header h2 svg {
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.notes-title-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-body {
+  flex: 1;
+  min-height: 0;
+  padding: 0.9rem 1.1rem;
+  display: flex;
+}
+
+.notes-body .notes-textarea {
+  flex: 1;
+  min-height: 180px;
+  resize: vertical;
+}
+
+.notes-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.85rem 1.1rem;
+  border-top: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  flex-shrink: 0;
+}
+
+.notes-footer-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.notes-status {
+  font-size: 0.72rem;
+  color: var(--fg-muted);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notes-textarea,
+.tab-notes-input {
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  background: var(--bg-primary);
+  color: var(--fg-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  font-size: 0.85rem;
+  line-height: 1.55;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.notes-textarea:focus,
+.tab-notes-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.notes-textarea::placeholder,
+.tab-notes-input::placeholder {
+  color: var(--fg-muted);
 }
 
 /* ── Content / panels ───────────────────────────────── */
@@ -1330,6 +1511,42 @@ body.settings-mode .modal-overlay {
   align-items: flex-start;
 }
 
+/* The per-tab notes editor opens in its OWN floating window (same technique as
+ * the settings window: dedicated webview + "dashboardNotes" bridge, transparent
+ * when the compositor allows it). The window shows only the .notes-card. */
+body.notes-mode {
+  background: var(--bg-app) radial-gradient(1100px 480px at 50% -12%, rgba(79, 141, 255, 0.08), transparent 60%);
+}
+
+body.notes-mode.dash-transparent {
+  background: transparent;
+}
+
+body.notes-mode .notes-overlay {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  background: transparent;
+  pointer-events: auto;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 10px;
+}
+
+body.notes-mode .notes-card {
+  width: 560px;
+  max-width: calc(100vw - 20px);
+  max-height: min(780px, calc(100vh - 20px));
+  /* No card shadow here: on the transparent window a big black box-shadow
+   * reads as a "black border" around the card over the desktop. */
+  box-shadow: none;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
+body.notes-mode.dash-transparent .notes-card {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+}
+
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -1599,6 +1816,17 @@ body.settings-mode .modal-overlay {
   gap: 0.75rem;
 }
 
+.tab-settings-row.tab-settings-notes {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.45rem;
+  margin-top: 0.25rem;
+}
+
+.tab-settings-notes label {
+  min-width: 0;
+}
+
 .tab-settings-row > label {
   font-size: 0.78rem;
   font-weight: 650;
@@ -1737,6 +1965,10 @@ body.settings-mode .modal-overlay {
 
 [data-theme="light"] .modal-overlay {
   background: rgba(15, 23, 42, 0.35);
+}
+
+[data-theme="light"] .notes-overlay {
+  background: rgba(15, 23, 42, 0.25);
 }
 
 [data-theme="light"] .brand-mark {

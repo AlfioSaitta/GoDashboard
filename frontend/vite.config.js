@@ -11,6 +11,7 @@ export default defineConfig({
       input: {
         index: path.resolve(__dirname, 'index.html'),
         settings: path.resolve(__dirname, 'settings.html'),
+        notes: path.resolve(__dirname, 'notes.html'),
       },
     },
     target: 'es2020',

@@ -101,9 +101,15 @@ func (a *App) ShellZoomNoContext(id int, level float64) {
 }
 
 // ShellSetChromeHeight resizes the chrome strip webview to the measured height
-// of header + tab bar (reported by the frontend).
+// of header + tab bar (reported by the frontend). The frontend also temporarily
+// grows the strip (to ~480px, see EXPANDED_STRIP in app.js) while a DOM popup
+// (tab context menu, inspector dropdown) is open so it is not clipped by the
+// thin strip — the tab pages below stay visible. The 40..800
+// range keeps accidental absurd values out while allowing that expansion.
+// NOTE: the notes editor is NOT such a popup — it lives in its own window
+// (OpenNotes/CloseNotes), so the strip is never resized for it.
 func (a *App) ShellSetChromeHeight(ctx context.Context, height int) {
-	if height < 40 || height > 400 {
+	if height < 40 || height > 800 {
 		return
 	}
 	logger.Printf("ShellSetChromeHeight: %d", height)
@@ -144,4 +150,31 @@ func (a *App) TabsChanged(ctx context.Context) {
 
 func (a *App) TabsChangedNoContext() {
 	a.TabsChanged(context.Background())
+}
+
+// OpenNotes opens the dedicated notes editor window for the given tab. The
+// window is a floating, non-modal card (like the Impostazioni window) so the
+// main window stays fully usable and the chrome strip is never resized — the
+// tab pages below never shift while the notes editor is open.
+func (a *App) OpenNotes(ctx context.Context, tabID int) {
+	if _, ok := a.tabManager.Get(tabID); !ok {
+		logger.Printf("OpenNotes: tab %d not found", tabID)
+		return
+	}
+	logger.Printf("OpenNotes: tab=%d", tabID)
+	shellOpenNotes(tabID)
+}
+
+func (a *App) OpenNotesNoContext(tabID int) {
+	a.OpenNotes(context.Background(), tabID)
+}
+
+// CloseNotes closes (destroys) the notes editor window.
+func (a *App) CloseNotes(ctx context.Context) {
+	logger.Printf("CloseNotes")
+	shellCloseNotes()
+}
+
+func (a *App) CloseNotesNoContext() {
+	a.CloseNotes(context.Background())
 }

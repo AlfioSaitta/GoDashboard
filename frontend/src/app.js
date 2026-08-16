@@ -112,6 +112,13 @@ async function mountSettingsView() {
         console.error('Failed to save tab settings:', error)
       }
     },
+    onNotesChange: async (tabId, notes) => {
+      try {
+        await api.saveNotes(tabId, notes)
+      } catch (error) {
+        console.error('Failed to save notes:', error)
+      }
+    },
     onClose: async () => {
       try { await api.closeSettings() } catch { /* noop */ }
     },
@@ -189,6 +196,13 @@ async function mountChrome() {
   let stripExpanded = false
   const knownTabIds = new Set()
 
+  // When a DOM popup (tab context menu, inspector dropdown) is open the chrome
+  // webview is grown so the popup is not clipped by the thin strip. The height
+  // is kept moderate so the tab pages (the GtkStack below the strip) stay
+  // visible instead of being collapsed to nothing. NOTE: the notes editor is a
+  // dedicated native window (see openNotes), never a DOM popup.
+  const EXPANDED_STRIP = 480
+
   // ── Chrome strip height (the Go shell sizes the chrome webview exactly to
   // header + tab bar, leaving the rest of the window to the tab stack).
   let heightSyncTimer = null
@@ -215,13 +229,21 @@ async function mountChrome() {
   function expandStrip() {
     if (stripExpanded) return
     stripExpanded = true
-    api.shellSetChromeHeight(2400).catch(() => {})
+    api.shellSetChromeHeight(EXPANDED_STRIP).catch(() => {})
   }
 
   function collapseStrip() {
     if (!stripExpanded) return
     stripExpanded = false
     api.shellSetChromeHeight(stripHeight).catch(() => {})
+  }
+
+  // ── Per-tab notes ───────────────────────────────────────
+  // The notes editor is a DEDICATED floating window (like the Impostazioni
+  // window: its own webview + "dashboardNotes" bridge), so the chrome strip is
+  // never resized and the tab pages below never shift while it is open.
+  function openNotes(tab) {
+    api.openNotes(tab.id).catch(err => console.error('Failed to open notes:', err))
   }
 
   function setTabZoom(tab, z) {
@@ -274,8 +296,13 @@ async function mountChrome() {
     },
     onZoom: (tab, delta) => setTabZoom(tab, zoomOf(tab) + delta),
     onResetZoom: (tab) => setTabZoom(tab, 1),
+    onNotes: (tab) => openNotes(tab),
     onPopupChange: (open) => { if (open) expandStrip(); else collapseStrip() },
   })
+
+  // Per-tab persistent notes editor is now a dedicated native window (see the
+  // notes bridge + tabs_shell.go notes window); the chrome only refreshes the
+  // note indicator via the "tabs:changed" event after a save.
 
   // Native webviews report their page title; show it transiently on the tab.
   runtime.EventsOn('shell:title', (data) => {

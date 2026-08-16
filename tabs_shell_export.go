@@ -61,3 +61,15 @@ func exportSettingsMessage(msg *C.char) {
 	}
 	handleSettingsMessage(C.GoString(msg))
 }
+
+// exportNotesMessage is called by the C shim whenever the notes webview posts
+// a bridge message ("dashboardNotes", see tabs_shell.go). The message is a JSON
+// {id, method, args} box handled by notes_bridge.go.
+//
+//export exportNotesMessage
+func exportNotesMessage(msg *C.char) {
+	if msg == nil {
+		return
+	}
+	handleNotesMessage(C.GoString(msg))
+}

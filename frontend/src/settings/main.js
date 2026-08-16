@@ -38,6 +38,7 @@ const settingsApi = {
   removeTab: (id) => call('removeTab', String(id)),
   updateTab: (id, config) => call('updateTab', String(id), config),
   updateTabSettings: (id, settings) => call('updateTabSettings', String(id), settings),
+  saveNotes: (id, notes) => call('saveNotes', String(id), notes),
   reorderTabs: (ids) => call('reorderTabs', ids),
   tabsChanged: () => call('tabsChanged'),
   closeSettings: () => call('closeSettings'),
@@ -153,6 +154,10 @@ async function mount() {
         settingsApi.shellZoom(tabId, settings.zoom).catch(() => {})
       }
       await settingsApi.updateTabSettings(tabId, settings)
+    },
+    onNotesChange: async (tabId, notes) => {
+      await settingsApi.saveNotes(tabId, notes)
+      settingsApi.tabsChanged().catch(() => {})
     },
     onClose: () => {
       settingsApi.closeSettings().catch(() => {})

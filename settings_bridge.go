@@ -187,6 +187,30 @@ func dispatchSettings(a *App, method string, args []interface{}) (interface{}, e
 		}
 		return a.UpdateTabSettings(ctx, id, settings)
 
+	case "getNotes":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("argomenti mancanti")
+		}
+		id, err := asString(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return a.tabAPI.GetNotes(ctx, id)
+
+	case "saveNotes":
+		if len(args) < 2 {
+			return nil, fmt.Errorf("argomenti mancanti")
+		}
+		id, err := asString(args[0])
+		if err != nil {
+			return nil, err
+		}
+		notes, err := asString(args[1])
+		if err != nil {
+			return nil, err
+		}
+		return a.tabAPI.SaveNotes(ctx, id, notes)
+
 	case "reorderTabs":
 		if len(args) < 1 {
 			return nil, fmt.Errorf("argomenti mancanti")

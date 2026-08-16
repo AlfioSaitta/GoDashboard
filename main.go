@@ -473,6 +473,24 @@ func (a *App) UpdateTabSettingsNoContext(id string, settings map[string]interfac
 	return a.tabAPI.UpdateTabSettings(context.Background(), id, settings)
 }
 
+// GetNotes returns the persistent notes of the given tab.
+func (a *App) GetNotes(ctx context.Context, id string) (string, error) {
+	return a.tabAPI.GetNotes(ctx, id)
+}
+
+func (a *App) GetNotesNoContext(id string) (string, error) {
+	return a.tabAPI.GetNotes(context.Background(), id)
+}
+
+// SaveNotes persists the notes of the given tab.
+func (a *App) SaveNotes(ctx context.Context, id string, notes string) (api.Tab, error) {
+	return a.tabAPI.SaveNotes(ctx, id, notes)
+}
+
+func (a *App) SaveNotesNoContext(id string, notes string) (api.Tab, error) {
+	return a.tabAPI.SaveNotes(context.Background(), id, notes)
+}
+
 func (a *App) ReorderTabs(ctx context.Context, ids []int) error {
 	return a.tabAPI.ReorderTabs(ctx, ids)
 }

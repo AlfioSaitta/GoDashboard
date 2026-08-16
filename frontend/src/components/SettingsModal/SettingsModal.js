@@ -18,7 +18,7 @@ const ICONS = [
 ]
 
 export class SettingsModal {
-  constructor(overlayEl, { onSave, onUpdateTab, onRemoveTab, onClose, onReorder, onThemeChange, onUpdateSettings }) {
+  constructor(overlayEl, { onSave, onUpdateTab, onRemoveTab, onClose, onReorder, onThemeChange, onUpdateSettings, onNotesChange }) {
     this.overlay = overlayEl
     this.onSave = onSave
     this.onUpdateTab = onUpdateTab
@@ -27,6 +27,7 @@ export class SettingsModal {
     this.onReorder = onReorder
     this.onThemeChange = onThemeChange
     this.onUpdateSettings = onUpdateSettings
+    this.onNotesChange = onNotesChange
     this.tabs = []
     this.editingId = null
     this.draggingId = null
@@ -194,6 +195,10 @@ export class SettingsModal {
               <button class="btn btn-icon btn-icon-soft zoom-reset" data-tab-id="${tab.id}" aria-label="Reimposta zoom" title="Reimposta zoom">1:1</button>
             </div>
           </div>
+          <div class="tab-settings-row tab-settings-notes">
+            <label for="notes-textarea-${tab.id}">Note</label>
+            <textarea id="notes-textarea-${tab.id}" class="tab-notes-input" data-tab-id="${tab.id}" rows="4" spellcheck="false" placeholder="Note persistenti per questo tab…">${escapeHtml(tab.notes || '')}</textarea>
+          </div>
         </li>
       ` : ''}
       `
@@ -233,6 +238,11 @@ export class SettingsModal {
       })
       range.addEventListener('change', () => {
         this.applySettings(id, { zoom: Number(range.value) / 100 })
+      })
+    })
+    list.querySelectorAll('.tab-notes-input').forEach(ta => {
+      ta.addEventListener('change', () => {
+        this.applyNotes(String(ta.dataset.tabId), ta.value)
       })
     })
     list.querySelectorAll('.remove-tab').forEach(btn => {
@@ -329,6 +339,20 @@ export class SettingsModal {
     if (this.onUpdateSettings) {
       try {
         await this.onUpdateSettings(tabId, merged)
+      } catch (error) {
+        this.showError('Errore: ' + error.message)
+      }
+    }
+  }
+
+  // Persists the tab's notes (called when the textarea loses focus / changes).
+  async applyNotes(tabId, notes) {
+    const tab = this.tabs.find(t => String(t.id) === String(tabId))
+    if (!tab) return
+    tab.notes = notes
+    if (this.onNotesChange) {
+      try {
+        await this.onNotesChange(tabId, notes)
       } catch (error) {
         this.showError('Errore: ' + error.message)
       }

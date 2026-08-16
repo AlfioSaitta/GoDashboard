@@ -17,8 +17,9 @@ work. This file documents the REAL project structure (verified by inspection), n
 ├── tabs_shell.go          # cgo (package main): native tab shell — GtkStack + per-tab WebKitWebView (webkit2_41)
 ├── tabs_shell_export.go   # cgo: //export callbacks (shell title/uri → wails events) + shellCtx
 ├── shell_app.go           # App methods: ShellShowTab/ShellDestroyTab/ShellReorder/ShellZoom/
-│                          #   ShellSetChromeHeight/OpenSettings/CloseSettings/TabsChanged + resolveTabURL
+│                          #   ShellSetChromeHeight/OpenSettings/OpenNotes/TabsChanged + resolveTabURL
 ├── settings_bridge.go     # Bridge Go for the settings WINDOW (dispatch on App + __dashReply)
+├── notes_bridge.go        # Bridge Go for the per-tab NOTES WINDOW (own webview + __dashReply)
 ├── inspector.go           # cgo: WebKitGTK page inspector per single tab webview (dock bottom/right/left/float)
 ├── persistent_cookies.go  # cgo: WebKitGTK cookie manager → SQLite persistent storage (webkit2_41)
 ├── wails.json             # Wails v2 config (embed dir: frontend/dist)
@@ -32,9 +33,12 @@ work. This file documents the REAL project structure (verified by inspection), n
 ├── frontend/
 │   ├── index.html         # Vite input (at frontend ROOT, not src/); gamepad-style placeholder
 │   ├── settings.html      # Vite input for the NATIVE settings window (no Wails runtime)
+│   ├── notes.html         # Vite input for the per-tab NATIVE notes window (no Wails runtime)
 │   ├── src/
 │   │   ├── main.js        # Imports main.css + mounts App on DOMContentLoaded
 │   │   ├── settings/      # Settings-window SPA (separate bundle): bridge + SettingsModal
+│   │   │   └── main.js
+│   │   ├── notes/         # Notes-window SPA (separate bundle): bridge + notes card UI
 │   │   │   └── main.js
 │   │   ├── app.js         # Renders chrome strip (header + tab bar) OR settings view (#settings)
 │   │   ├── components/
@@ -46,7 +50,7 @@ work. This file documents the REAL project structure (verified by inspection), n
 │   │   └── styles/main.css                  # THEME: CSS variables, dark/light, tab bar, modal, cards
 │   ├── wailsjs/           # AUTO-GENERATED bindings (do not hand-edit)
 │   ├── dist/              # Built assets embedded by Wails
-│   ├── vite.config.js     # Multi-entry build (index + settings); CreateApp bootstrap only in index.html
+│   ├── vite.config.js     # Multi-entry build (index/settings/notes); CreateApp bootstrap only in index.html
 │   └── package.json
 └── internal/
     ├── api/
@@ -102,7 +106,7 @@ holds one **own WebKitWebView per tab**:
 - All Wails-bound Go methods go through `shell_request(...)` → `g_idle_add` →
   `shell_req_cb`, so every GTK/WebKit call happens on the GTK main thread. Ops:
   `0=setup, 1=show, 2=destroy, 3=reorder, 4=zoom, 5=chrome height, 6=open settings,
-  7=close settings, 8=inspector`. (each shell_* C function keeps a re-entrance guard
+  7=close settings, 8=inspector, 9=open notes, 10=close notes`. (each shell_* C function keeps a re-entrance guard
   so the idle-reinvoked code path does not repackage twice).
 - **Home strip**: repackaging the WebKitView into `vbox` also REMOVES the roaming
   WebKit home-iframe whitespace/resize quirks on the tab strip (the DA does not
@@ -114,13 +118,19 @@ holds one **own WebKitWebView per tab**:
 ### shell_app.go — Wails-bound shell controller
 Every `App` method below also has a `...NoContext` twin (frontend calls those):
 - `ShellShowTab(id)` / `ShellDestroyTab(id)` / `ShellReorder(ids)` / `ShellZoom(id, level)`
-- `ShellSetChromeHeight(px)` (clamped 40–400) — repackages the chromewebview (`size_request`);
-  the tab-stack expands to fill the new layout
+- `ShellSetChromeHeight(px)` (clamped 40–800; the high bound lets the frontend
+  grow the strip to ~480px while a DOM popup — context menu or inspector dropdown —
+  is open; the tab pages underneath stay visible) — repackages the chrome webview
+  (`size_request`); the tab-stack keeps the rest of the window
 - `OpenSettings()` / `CloseSettings()` — opens/closes the **native settings window**
   (a second WebKitWebView with a DEDICATED user content manager, loading
   `wails://wails/settings.html`; `delete-event` hides it — see tabs_shell.go:
   shell_open_settings)
-- `TabsChanged()` — emits `tabs:changed` (for the settings window / chrome to reload tabs)
+- `OpenNotes(tabID)` / `CloseNotes()` — opens/closes the **dedicated notes window**
+  for a tab (same architecture as the settings window: own webview + ucm + bridge,
+  load `wails://wails/notes.html?tab=<id>`; NOT modal), so the chrome strip is never
+  resized and the tab pages never shift while editing notes
+- `TabsChanged()` — emits `tabs:changed` (for the settings/notes window / chrome to reload tabs)
 - `resolveTabURL(tab)` — builds the real admin URL for builtin tabs
   (service key → `backoffice_url > base_url+admin_path > base_url`, legacy fallbacks)
 - `tabZoomOf(tab)` — reads `settings["zoom"]` (0.5–2.5, default 1)
@@ -141,6 +151,8 @@ and `TabAPI` (tab CRUD):
 - `TabAPI.ListTabs` — if tabs.json is empty, seeds the 3 defaults (neuronet/minecraft/slotbuilder)
 - `TabAPI.UpdateTab(id, config)` — updates label/url/icon from a `map[string]interface{}`
 - `TabAPI.UpdateTabSettings(id, settings)` — replaces the per-tab display settings bag
+- `TabAPI.GetNotes(id)` / `TabAPI.SaveNotes(id, notes)` — per-tab persistent notes
+  (field `Notes` on the tab, `data/tabs.json`; `Tab`/`TabInfo` expose `notes`)
 - `TabAPI.ReorderTabs(ids []int)` — reorders by id list (added for drag&drop)
 - API response types (`TabInfo`, `ServiceStatus`, sub-dashboards, proxy types) all here.
   `TabInfo.Settings` carries the per-tab display settings (`{zoom: float}`).
@@ -189,9 +201,10 @@ NOTE: since tabs became native webviews the proxy is no longer required for the 
 (5s timeout) and `GetXxxDashboard` gathers lists (used by the health/status pills).
 
 ### internal/tab/manager.go
-`TabManager` persists `[]Tab{ID,Title,URL,Icon}` to `data/tabs.json`
+`TabManager` persists `[]Tab{ID,Title,URL,Icon,Notes}` to `data/tabs.json`
 (`<exedir>/data/tabs.json`; portable). `Add` assigns
-`nextID`. `Update` keeps old values when empty. `Reorder(ids)` validates the id set.
+`nextID`. `Update` keeps old values when empty. `SetNotes(id, notes)` persists the
+per-tab notes atomically. `Reorder(ids)` validates the id set.
 
 ### internal/tray
 D-Bus StatusNotifierItem on the session bus (no appindicator CGO dependency).
@@ -224,7 +237,7 @@ runtime (custom bridge). Any vite.config change needs a full rebuild.
 4. **Chrome strip height**: `measureStripHeight()` = `tabBar.getBoundingClientRect().bottom + 2`
    (min 60, fallback 104) → `api.shellSetChromeHeight(px)`; debounced (30ms) + on window
    resize. **DOM popups** (context menu, inspector dropdown) that would be clipped by the
-   thin strip use `expandStrip()` (height 2400) / `collapseStrip()` (`stripExpanded` guard).
+   thin strip use `expandStrip()` (height 480) / `collapseStrip()` (`stripExpanded` guard).
 5. **Native tab lifecycle** (keep-alive): `switchTab(tab)` calls `api.shellShowTab(tab.id)`
    and tracks the active id. `loadTabs()` removes webviews of deleted tabs via
    `knownTabIds` (per-process) → `api.shellDestroyTab(id)`; respects
@@ -238,6 +251,16 @@ runtime (custom bridge). Any vite.config change needs a full rebuild.
 10. **Per-tab display settings** — `settings` map persisted via `api.updateTabSettings`.
     `zoom` (0.5–2.5) is applied NATIVELY via `api.shellZoom(id, level)` at show time +
     live; the SettingsModal zoom slider calls the same path.
+11. **Persistent per-tab notes** — the editor is a DEDICATED floating window (like the
+    Impostazioni window), NOT a DOM card in the chrome: `openNotes(tab)` →
+    `api.openNotes(tab.id)` → `App.OpenNotes` → `shell_open_notes` (tabs_shell.go)
+    opens `wails://wails/notes.html?tab=<id>`. Every save goes through the notes
+    bridge → `TabAPI.SaveNotes` (persisted in `data/tabs.json`), then a
+    `TabsChanged()` so the chrome refreshes the per-tab note indicator. Because the
+    editor lives in its own window the chrome strip is never expanded and the tab
+    pages never shift while editing notes. Open from the tab context menu **Nota** or
+    the per-tab `tab-note-btn`; the settings window's per-tab panel still hosts a
+    notes textarea (saves via the `saveNotes` bridge method).
 11. **Inspector dropdown** (header, right of settings) — `api.inspectorOpen(mode, activeTabId)`
     with `bottom|right|left|float` and `api.inspectorClose()`; hidden when
     `api.inspectorAvailable()` is false (non-devtools build).
@@ -257,7 +280,7 @@ That page is a **separate vite entry** (`frontend/settings.html` →
 - Replies come back via `shell_settings_eval` (g_idle → `webkit_web_view_evaluate_javascript`)
   → `window.__dashReply({id, ok, result|error})`.
 Bridge methods: getTabs/getTheme/getSystemTheme/setTheme/saveTabConfig/removeTab/
-updateTab/updateTabSettings/reorderTabs/tabsChanged/closeSettings/shellZoom.
+updateTab/updateTabSettings/getNotes/saveNotes/reorderTabs/tabsChanged/closeSettings/shellZoom/resize.
 - **Frameless**: the window is `gtk_window_set_decorated(FALSE)` like the main app.
   Dragging is bound to the CARD HEADER, not a strip above it: `settings_drag_press`
   (button-press-event on the webview) asks the *page* via
@@ -320,6 +343,31 @@ thread). A **C-side fallback** (`settings_fit_timeout` in tabs_shell.go) probes
 - Theme changes in the settings window are broadcast to the chrome via the wails
   event `shell:theme` (emitted by `SetTheme`; chrome listens in app.js).
 
+### Notes window (per-tab notes editor) — dedicated floating window
+The per-tab notes editor is a SECOND floating window reusing the settings-window
+architecture (own webview + ucm + custom bridge, NO Wails IPC) so the chrome strip
+is never touched:
+- `App.OpenNotes(tabID)` → `shellOpenNotes` (tabs_shell.go op 9) →
+  `shell_open_notes` creates a frameless, `transient_for` + `keep_above` (NOT
+  modal) window with a dedicated ucm registering the `dashboardNotes` message
+  handler and loads `wails://wails/notes.html?tab=<id>` (a separate vite entry:
+  `frontend/notes.html` → `frontend/src/notes/main.js`). `App.CloseNotes()` → op 10
+  → `shell_close_notes` destroys the window+ucm (recreated on next open).
+- The page talks to Go via `window.webkit.messageHandlers.dashboardNotes.postMessage`
+  → `exportNotesMessage` → `handleNotesMessage` (notes_bridge.go) dispatching on
+  `App`; replies come back via `shell_notes_eval` → `window.__dashReply`.
+  Bridge methods: getTab/getNotes/saveNotes/getTheme/getSystemTheme/closeNotes/resize.
+  `saveNotes` ends with `TabsChanged()` so the chrome refreshes the per-tab note
+  indicator immediately.
+- Same window dressing as settings: transparent when the compositor allows
+  (`body.notes-mode.dash-transparent`), drag on the card header
+  (`notes_drag_press`, `.notes-header`), content-fit (`scheduleFit` in
+  notes/main.js + the `notes_fit_timeout` C fallback armed on the first
+  `getNotes` message), 10px margin around the 560px `.notes-card`. The page
+  centres the card horizontally and keeps it flush to the top.
+- Because the editor is a real window, opening it NEVER resizes the chrome strip
+  or the tab-stack: the tab pages below stay exactly where they were.
+
 ### stores/dashboard.js
 Tiny singleton: `tabs[]`, `lastStatuses[]`, `listeners`, `setTabs/subscribe/notify`,
 `getDefaultTab/setDefaultTab` (localStorage). Used by app.js for default tab + statuses;
@@ -331,8 +379,13 @@ tab content itself is native webviews handled by the Go shell.
 - **Drag & drop** reordering: HTML5 dragstart/dragover/drop on `.tab-bar-item`;
   on drop it re-slices `this.tabs` and calls `onReorder(ids)`.
 - **Context menu** (right click): Rinomina (inline input), Imposta come predefinito,
-  Apri in browser, Duplica, Zoom −/%/+ (keep-open), Reimposta zoom (toolbar removed
-  with the iframe era). `setDefaultTabId()` marks the default.
+  Apri in browser, Duplica, **Nota** (opens the dedicated per-tab notes window),
+  Zoom −/%/+ (keep-open), Reimposta zoom (toolbar removed with the iframe era).
+  `setDefaultTabId()` marks the default.
+- **Persistent per-tab notes**: every pill has a small `tab-note-btn` (icon) that
+  opens the dedicated notes window for that tab; it turns warning-coloured when the
+  tab has notes (`tab.notes` non-empty, persisted via `TabAPI.SaveNotes`).
+  `refreshNotes()` updates the indicator in place after a save.
 - `setPageTitle(tabId, title)` shows the live page title transiently (ignored while
   an inline rename is active). `onPopupChange(open)` is called when the context menu
   opens/closes so app.js can expand/collapse the strip.
@@ -426,9 +479,14 @@ export SLOTBUILDER_TOKEN=xxx
 7. **`ServiceManager` data**: live calls hit real endpoints; if a service is down,
    header pills go offline (no panels any more).
 8. **DOM popups need strip expansion**: the chrome strip is ~104px, so any DOM popup
-   (tab context menu, inspector dropdown) is clipped. app.js expands the strip to
-   2400px (`expandStrip`) while the popup is open and collapses it on close
-   (`stripExpanded` guard; `syncChromeHeight` is skipped while expanded).
+   (tab context menu, inspector dropdown) is clipped. app.js expands
+   the strip to ∃480px (`expandStrip` — `EXPANDED_STRIP`) while the popup is open and
+   collapses it on close (`stripExpanded` guard; `syncChromeHeight` is skipped while
+   expanded). The height is deliberately MODERATE so the tab pages (GtkStack below
+   the strip) stay visible; a taller strip (e.g. 2400) would collapse the pages out
+   of view entirely. NOTE: the notes editor is NOT a DOM popup any more — it lives
+   in its own floating window (see "Notes window" below), so the strip is never
+   expanded for it and the tab pages never shift.
 9. **JS debug → Go log**: `window.runtime.LogPrint`/`LogDebug` do NOT reach
    `dashboard.log`. To debug DOM from JS, use `fmt.Printf`/`log.Printf` in a Go method
    (e.g. temporarily add a `DebugLog` bound method to App), regenerate bindings, and

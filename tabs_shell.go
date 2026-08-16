@@ -34,11 +34,17 @@ static WebKitWebView *g_shell_settings_view = NULL;
 static GtkWidget *g_shell_settings_win = NULL;
 static int g_settings_transparent = 0;         // window transparency enabled?
 static WebKitUserContentManager *g_settings_ucm = NULL; // dedicated ucm for the settings window
+static WebKitWebView *g_shell_notes_view = NULL;    // per-tab notes editor window
+static GtkWidget *g_shell_notes_win = NULL;
+static int g_notes_transparent = 0;           // notes window transparency enabled?
+static WebKitUserContentManager *g_notes_ucm = NULL; // dedicated ucm for the notes window
+static int g_notes_tab_id = -1;               // tab whose notes are being edited
 static int shell_chrome_h = 104;             // default strip height (px)
 
 extern void exportShellTitle(int id, const char *title);
 extern void exportShellUri(int id, const char *uri);
 extern void exportSettingsMessage(const char *msg);
+extern void exportNotesMessage(const char *msg);
 
 // Recursively find a widget by its GTK name (Wails names the container of the
 // main webview "webview-box").
@@ -560,6 +566,320 @@ static void shell_close_settings(void)
 	}
 }
 
+// --- notes window -----------------------------------------------------------
+//
+// The per-tab notes editor is a DEDICATED floating window (same architecture as
+// the settings window: its own webview + user content manager + custom bridge
+// "dashboardNotes", no Wails IPC). It is deliberately NOT modal — transient_for
+// + keep_above leaves the main window fully usable and clickable — and unlike
+// the former DOM notes card it does NOT touch the chrome strip, so the tab pages
+// below never get resized/shifted while the notes editor is open.
+//
+// The page is "wails://wails/notes.html?tab=<id>", a separate vite entry
+// (frontend/src/notes/main.js) that talks to Go through "dashboardNotes" and
+// receives replies via window.__dashReply (notes_bridge.go -> shell_notes_eval).
+
+static void on_notes_message(WebKitUserContentManager *ucm,
+                             WebKitJavascriptResult *result, gpointer data)
+{
+	char *msg = NULL;
+#if WEBKIT_MAJOR_VERSION >= 2 && WEBKIT_MINOR_VERSION >= 22
+	JSCValue *value = webkit_javascript_result_get_js_value(result);
+	msg = jsc_value_to_string(value);
+#else
+	JSGlobalContextRef context = webkit_javascript_result_get_global_context(result);
+	JSValueRef value = webkit_javascript_result_get_value(result);
+	JSStringRef js = JSValueToStringCopy(context, value, NULL);
+	size_t size = JSStringGetMaximumUTF8CStringSize(js);
+	msg = g_new(char, size);
+	JSStringGetUTF8CString(js, msg, size);
+	JSStringRelease(js);
+#endif
+	if (msg) {
+		exportNotesMessage(msg);
+		g_free(msg);
+	}
+}
+
+static char *notes_page_url(int tab_id)
+{
+	const char *base = shell_chrome ? webkit_web_view_get_uri(shell_chrome) : NULL;
+	if (!base || !base[0])
+		return g_strdup_printf("wails://wails/notes.html?tab=%d%s", tab_id,
+			g_notes_transparent ? "&t=1" : "");
+
+	char *tmp = g_strdup(base);
+	char *hash = strchr(tmp, '#');
+	if (hash)
+		*hash = '\0';
+	char *query = strchr(tmp, '?');
+	if (query)
+		*query = '\0';
+	size_t len = strlen(tmp);
+	if (len > 0 && tmp[len - 1] != '/') {
+		char *slash = strrchr(tmp, '/');
+		if (slash)
+			slash[1] = '\0';
+	}
+	char *res = g_strdup_printf("%snotes.html?tab=%d%s", tmp, tab_id,
+		g_notes_transparent ? "&t=1" : "");
+	g_free(tmp);
+	return res;
+}
+
+// Drag the notes window on the CARD HEADER only (.notes-header, sibling buttons
+// excluded). Mirrors settings_drag_press with the notes window's globals.
+static GdkEventButton g_notes_press;
+static gboolean g_notes_press_valid = FALSE;
+
+static void notes_drag_check_done(GObject *src, GAsyncResult *res, gpointer data)
+{
+	WebKitWebView *view = WEBKIT_WEB_VIEW(src);
+	GError *gerr = NULL;
+	JSCValue *v = webkit_web_view_evaluate_javascript_finish(view, res, &gerr);
+	if (gerr) {
+		g_error_free(gerr);
+		g_notes_press_valid = FALSE;
+		return;
+	}
+	if (!v || !jsc_value_is_boolean(v)) {
+		if (v)
+			g_object_unref(v);
+		g_notes_press_valid = FALSE;
+		return;
+	}
+	gboolean drag = jsc_value_to_boolean(v);
+	g_object_unref(v);
+	if (!drag || !g_notes_press_valid || !g_shell_notes_win) {
+		g_notes_press_valid = FALSE;
+		return;
+	}
+	gtk_window_begin_move_drag(GTK_WINDOW(g_shell_notes_win),
+		g_notes_press.button, (gint)g_notes_press.x_root,
+		(gint)g_notes_press.y_root, g_notes_press.time);
+	g_notes_press_valid = FALSE;
+}
+
+static gboolean notes_drag_press(GtkWidget *w, GdkEvent *event, gpointer data)
+{
+	GdkEventButton *ev = (GdkEventButton *)event;
+	if (ev->type != GDK_BUTTON_PRESS || ev->button != 1)
+		return FALSE;
+	WebKitWebView *view = g_shell_notes_view;
+	if (!view)
+		return FALSE;
+	g_notes_press = *ev;
+	g_notes_press_valid = TRUE;
+	const char *tpl =
+		"(function(x,y){var e=document.elementFromPoint(x,y);"
+		"if(!e)return false;"
+		"for(var n=e;n;n=n.parentElement){"
+		"if(n.tagName==='BUTTON'||(n.classList&&n.classList.contains('btn')))return false;"
+		"if(n.classList&&(n.classList.contains('notes-header')||n.classList.contains('modal-header')))return true;}"
+		"return false;})(%d,%d)";
+	char *js = g_strdup_printf(tpl, (int)ev->x, (int)ev->y);
+	webkit_web_view_evaluate_javascript(view, js, -1, NULL, NULL, NULL, notes_drag_check_done, NULL);
+	g_free(js);
+	return FALSE;
+}
+
+// Content-fit fallback for the notes window (same idea as settings_fit_* but
+// measuring ".notes-card"). The page itself reports the card size over the
+// bridge ("resize"); this probe covers stale bundles, running a few times.
+static int notes_fit_attempts_left = 0;
+
+static void notes_fit_eval_done(GObject *src, GAsyncResult *res, gpointer data)
+{
+	WebKitWebView *view = WEBKIT_WEB_VIEW(src);
+	GError *gerr = NULL;
+	JSCValue *v = webkit_web_view_evaluate_javascript_finish(view, res, &gerr);
+	if (gerr) {
+		g_error_free(gerr);
+		return;
+	}
+	if (!v)
+		return;
+	if (jsc_value_is_string(v)) {
+		char *str = jsc_value_to_string(v);
+		if (str && str[0]) {
+			int w = 0, h = 0;
+			if (sscanf(str, "%d,%d", &w, &h) == 2 && w >= 200 && h >= 100 && g_shell_notes_win) {
+				notes_fit_attempts_left = 0;
+				gtk_window_resize(GTK_WINDOW(g_shell_notes_win), w, h);
+				g_free(str);
+				g_object_unref(v);
+				return;
+			}
+		}
+		if (str)
+			g_free(str);
+	}
+	g_object_unref(v);
+}
+
+static gboolean notes_fit_timeout(gpointer data)
+{
+	WebKitWebView *view = g_shell_notes_view;
+	if (!view || !g_shell_notes_win) {
+		notes_fit_attempts_left = 0;
+		return FALSE;
+	}
+	const char *js =
+		"(function(){var o=document.querySelector('.notes-card');"
+		"if(!o)return '';"
+		"var r=o.getBoundingClientRect();"
+		"return Math.round(r.width+24)+','+Math.round(Math.min(r.height,780)+24);})()";
+	webkit_web_view_evaluate_javascript(view, js, -1, NULL, NULL, NULL, notes_fit_eval_done, NULL);
+	notes_fit_attempts_left--;
+	return notes_fit_attempts_left > 0 ? TRUE : FALSE;
+}
+
+static void notes_fit_start(void)
+{
+	if (!g_shell_notes_view)
+		return;
+	notes_fit_attempts_left = 6;
+	g_timeout_add(500, notes_fit_timeout, NULL);
+}
+
+void shell_notes_fit_start(void)
+{
+	if (g_shell_notes_view)
+		notes_fit_start();
+}
+
+// Transparent window for the notes card (same recipe as the settings window).
+static void notes_enable_transparency(void)
+{
+	g_notes_transparent = 0;
+	if (!g_shell_notes_win)
+		return;
+	GdkScreen *screen = gtk_widget_get_screen(GTK_WIDGET(g_shell_notes_win));
+	if (!gdk_screen_is_composited(screen))
+		return;
+	GdkVisual *visual = gdk_screen_get_rgba_visual(screen);
+	if (!visual)
+		return;
+	g_notes_transparent = 1;
+	gtk_widget_set_visual(GTK_WIDGET(g_shell_notes_win), visual);
+	gtk_widget_set_app_paintable(GTK_WIDGET(g_shell_notes_win), TRUE);
+	g_signal_connect(g_shell_notes_win, "draw", G_CALLBACK(settings_draw_clear), NULL);
+	gtk_window_set_type_hint(GTK_WINDOW(g_shell_notes_win), GDK_WINDOW_TYPE_HINT_UTILITY);
+}
+
+static void shell_open_notes(int tab_id)
+{
+	if (g_shell_notes_win) {
+		if (gtk_widget_get_visible(g_shell_notes_win))
+			gtk_window_present(GTK_WINDOW(g_shell_notes_win));
+		else
+			gtk_widget_show_all(g_shell_notes_win);
+		if (g_notes_tab_id != tab_id) {
+			// Already showing another tab's notes: reload the page for this tab.
+			char *url = notes_page_url(tab_id);
+			g_notes_tab_id = tab_id;
+			if (url && url[0])
+				webkit_web_view_load_uri(g_shell_notes_view, url);
+			g_free(url);
+		}
+		return;
+	}
+
+	char *url = notes_page_url(tab_id);
+
+	g_shell_notes_win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+	gtk_window_set_title(GTK_WINDOW(g_shell_notes_win), "Note");
+	gtk_window_set_default_size(GTK_WINDOW(g_shell_notes_win), 520, 480);
+	// Frameless like the main/settings windows; dragged on the card header.
+	gtk_window_set_decorated(GTK_WINDOW(g_shell_notes_win), FALSE);
+	notes_enable_transparency();
+	// NOT modal: like the settings window, transient + raise-above keeps the
+	// card in front while the main window stays fully usable and clickable.
+	if (shell_main_win) {
+		gtk_window_set_transient_for(GTK_WINDOW(g_shell_notes_win), GTK_WINDOW(shell_main_win));
+		gtk_window_set_keep_above(GTK_WINDOW(g_shell_notes_win), TRUE);
+	}
+	g_signal_connect(g_shell_notes_win, "delete-event", G_CALLBACK(gtk_widget_hide_on_delete), NULL);
+
+	// Dedicated user content manager for the notes IPC (see above).
+	g_notes_ucm = webkit_user_content_manager_new();
+	webkit_user_content_manager_register_script_message_handler(g_notes_ucm,
+		"dashboardNotes");
+	g_signal_connect(g_notes_ucm, "script-message-received::dashboardNotes",
+		G_CALLBACK(on_notes_message), NULL);
+
+	g_shell_notes_view = WEBKIT_WEB_VIEW(
+		webkit_web_view_new_with_user_content_manager(g_notes_ucm));
+	WebKitSettings *set = webkit_web_view_get_settings(g_shell_notes_view);
+	webkit_settings_set_enable_developer_extras(set, TRUE);
+
+	if (g_notes_transparent) {
+		GdkRGBA clear = { 0, 0, 0, 0 };
+		webkit_web_view_set_background_color(g_shell_notes_view, &clear);
+	}
+
+	g_signal_connect(G_OBJECT(g_shell_notes_view), "button-press-event",
+		G_CALLBACK(notes_drag_press), NULL);
+
+	gtk_container_add(GTK_CONTAINER(g_shell_notes_win), GTK_WIDGET(g_shell_notes_view));
+	gtk_widget_show_all(g_shell_notes_win);
+	g_notes_tab_id = tab_id;
+	if (url && url[0])
+		webkit_web_view_load_uri(g_shell_notes_view, url);
+	g_free(url);
+}
+
+// Evaluate JS inside the notes webview (called from Go to deliver bridge
+// replies — never from the GTK thread directly).
+static gboolean notes_eval_idle(gpointer d)
+{
+	char *js = (char *)d;
+	if (g_shell_notes_view)
+		webkit_web_view_evaluate_javascript(g_shell_notes_view, js, -1, NULL, NULL, NULL, NULL, NULL);
+	g_free(js);
+	return FALSE;
+}
+
+void shell_notes_eval(const char *js)
+{
+	if (!js)
+		return;
+	g_idle_add(notes_eval_idle, g_strdup(js));
+}
+
+// Resize the notes window to fit its HTML content (bridge "resize" method).
+static gboolean notes_resize_cb(gpointer d)
+{
+	int *wh = (int *)d;
+	if (g_shell_notes_win)
+		gtk_window_resize(GTK_WINDOW(g_shell_notes_win), wh[0], wh[1]);
+	g_free(wh);
+	return FALSE;
+}
+
+void shell_notes_resize(int w, int h)
+{
+	int *wh = g_malloc(2 * sizeof(int));
+	wh[0] = w;
+	wh[1] = h;
+	g_idle_add(notes_resize_cb, wh);
+}
+
+static void shell_close_notes(void)
+{
+	if (g_shell_notes_win) {
+		gtk_widget_destroy(g_shell_notes_win);
+		g_shell_notes_win = NULL;
+		g_shell_notes_view = NULL;
+		g_notes_tab_id = -1;
+		if (g_notes_ucm) {
+			g_object_unref(g_notes_ucm);
+			g_notes_ucm = NULL;
+		}
+		notes_fit_attempts_left = 0;
+	}
+}
+
 // --- page inspector of a specific TAB --------------------------------------
 static int g_ins_side = -1; // -1 none/float, 0 bottom, 1 right, 2 left
 static gulong g_ins_configure_id = 0;
@@ -586,7 +906,8 @@ static void shell_ins_layout(void)
 	GList *toplevels = gtk_window_list_toplevels();
 	for (GList *l = toplevels; l; l = l->next) {
 		GtkWidget *w = GTK_WIDGET(l->data);
-		if (w == shell_main_win || (g_shell_settings_win && w == g_shell_settings_win))
+		if (w == shell_main_win || (g_shell_settings_win && w == g_shell_settings_win)
+			|| (g_shell_notes_win && w == g_shell_notes_win))
 			continue;
 		if (GTK_IS_WINDOW(w) && gtk_widget_get_visible(w)) {
 			iw = GTK_WINDOW(w);
@@ -664,7 +985,7 @@ static void shell_inspector(int mode, int tab_id)
 typedef struct {
 	int op;        // 0 setup, 1 show, 2 destroy, 3 reorder, 4 zoom,
 	               // 5 chrome height, 6 open settings, 7 close settings,
-	               // 8 inspector
+	               // 8 inspector, 9 open notes, 10 close notes
 	int id;
 	double zoom;
 	int height;
@@ -694,6 +1015,8 @@ static gboolean shell_req_cb(gpointer data)
 	case 6: shell_open_settings(); break;
 	case 7: shell_close_settings(); break;
 	case 8: shell_inspector(req->op_extra, req->id); break;
+	case 9: shell_open_notes(req->id); break;
+	case 10: shell_close_notes(); break;
 	}
 	if (req->url) g_free(req->url);
 	if (req->ids) g_free(req->ids);
@@ -760,6 +1083,14 @@ func shellPostInspector(mode string, tabID int) {
 		code = 4
 	}
 	C.shell_request(C.int(8), C.int(tabID), nil, 0, 0, nil, 0, C.int(code))
+}
+
+func shellOpenNotes(tabID int) {
+	C.shell_request(C.int(9), C.int(tabID), nil, 0, 0, nil, 0, 0)
+}
+
+func shellCloseNotes() {
+	C.shell_request(C.int(10), 0, nil, 0, 0, nil, 0, 0)
 }
 
 // shellSetup schedules the widget repackage to run at the start of the GTK

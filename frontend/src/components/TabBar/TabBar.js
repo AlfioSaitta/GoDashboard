@@ -6,7 +6,7 @@ const ZOOM_STEP = 0.1
 export class TabBar {
   constructor(container, {
     onTabChange, onAddTab, onReorder, onSetDefault,
-    onOpenExternal, onRenameTab, onDuplicateTab,
+    onOpenExternal, onRenameTab, onDuplicateTab, onNotes,
     onZoom, onResetZoom, onPopupChange,
   }) {
     this.container = container
@@ -17,6 +17,7 @@ export class TabBar {
     this.onOpenExternal = onOpenExternal
     this.onRenameTab = onRenameTab
     this.onDuplicateTab = onDuplicateTab
+    this.onNotes = onNotes
     this.onZoom = onZoom
     this.onResetZoom = onResetZoom
     this.onPopupChange = onPopupChange
@@ -66,6 +67,7 @@ export class TabBar {
     container.innerHTML = ''
 
     for (const tab of this.tabs) {
+      const hasNotes = !!(tab.notes && String(tab.notes).trim())
       const item = createElement(`
         <div class="tab-bar-item" data-tab-id="${tab.id}" draggable="true"
              title="${escapeHtml(this.tabTooltip(tab))}">
@@ -74,11 +76,20 @@ export class TabBar {
             ${icon(tab.icon, 14)}
             <span class="tab-label">${escapeHtml(tab.label)}</span>
           </button>
+          <button class="tab-note-btn ${hasNotes ? 'has-note' : ''}" data-tab-id="${tab.id}"
+                  title="${hasNotes ? 'Note presenti — modifica' : 'Aggiungi una nota'}">
+            ${icon('note', 12)}
+          </button>
         </div>
       `)
 
       item.querySelector('.tab-btn').addEventListener('click', () => {
         this.onTabChange(tab.id)
+      })
+
+      item.querySelector('.tab-note-btn').addEventListener('click', (e) => {
+        e.stopPropagation()
+        if (this.onNotes) this.onNotes(tab)
       })
 
       item.addEventListener('contextmenu', (e) => {
@@ -154,6 +165,7 @@ export class TabBar {
       { label: isDefault ? '✓ Tab predefinito' : 'Imposta come predefinito', icon: 'check', action: () => this.onSetDefault && this.onSetDefault(tab.id) },
       { label: 'Apri in browser', icon: 'external', action: () => this.onOpenExternal && this.onOpenExternal(tab) },
       { label: 'Duplica', icon: 'copy', action: () => this.onDuplicateTab && this.onDuplicateTab(tab) },
+      { label: 'Nota', icon: 'note', action: () => this.onNotes && this.onNotes(tab) },
       { divider: true },
       { label: 'Zoom −', icon: 'minus', keep: true, action: () => this.onZoom && this.onZoom(tab, -ZOOM_STEP) },
       { label: `${zoom}%`, icon: 'chart', disabled: true },
@@ -287,6 +299,17 @@ export class TabBar {
     if (!item) return
     const label = item.querySelector('.tab-label')
     if (label && !item.classList.contains('renaming')) label.textContent = String(title)
+  }
+
+  // Refreshes the note-indicator state in place (called after a note save)
+  // without re-rendering the whole bar.
+  refreshNotes() {
+    this.container.querySelectorAll('.tab-note-btn').forEach(btn => {
+      const tab = this.tabs.find(t => String(t.id) === String(btn.dataset.tabId))
+      const hasNotes = !!(tab && tab.notes && String(tab.notes).trim())
+      btn.classList.toggle('has-note', hasNotes)
+      btn.title = hasNotes ? 'Note presenti — modifica' : 'Aggiungi una nota'
+    })
   }
 
   setDefaultTabId(tabId) {
