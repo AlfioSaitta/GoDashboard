@@ -7,7 +7,7 @@ export class TabBar {
   constructor(container, {
     onTabChange, onAddTab, onReorder, onSetDefault,
     onOpenExternal, onRenameTab, onDuplicateTab, onNotes,
-    onZoom, onResetZoom, onPopupChange,
+    onZoom, onResetZoom, onPopupChange, onTerminal,
   }) {
     this.container = container
     this.onTabChange = onTabChange
@@ -21,6 +21,7 @@ export class TabBar {
     this.onZoom = onZoom
     this.onResetZoom = onResetZoom
     this.onPopupChange = onPopupChange
+    this.onTerminal = onTerminal
     this.tabs = []
     this.statuses = []
     this.activeTab = null
@@ -76,6 +77,9 @@ export class TabBar {
             ${icon(tab.icon, 14)}
             <span class="tab-label">${escapeHtml(tab.label)}</span>
           </button>
+          <button class="tab-terminal-btn" data-tab-id="${tab.id}" title="Terminale SSH">
+            ${icon('terminal', 12)}
+          </button>
           <button class="tab-note-btn ${hasNotes ? 'has-note' : ''}" data-tab-id="${tab.id}"
                   title="${hasNotes ? 'Note presenti — modifica' : 'Aggiungi una nota'}">
             ${icon('note', 12)}
@@ -87,9 +91,9 @@ export class TabBar {
         this.onTabChange(tab.id)
       })
 
-      item.querySelector('.tab-note-btn').addEventListener('click', (e) => {
+      item.querySelector('.tab-terminal-btn').addEventListener('click', (e) => {
         e.stopPropagation()
-        if (this.onNotes) this.onNotes(tab)
+        if (this.onTerminal) this.onTerminal(tab)
       })
 
       item.addEventListener('contextmenu', (e) => {
@@ -165,6 +169,7 @@ export class TabBar {
       { label: isDefault ? '✓ Tab predefinito' : 'Imposta come predefinito', icon: 'check', action: () => this.onSetDefault && this.onSetDefault(tab.id) },
       { label: 'Apri in browser', icon: 'external', action: () => this.onOpenExternal && this.onOpenExternal(tab) },
       { label: 'Duplica', icon: 'copy', action: () => this.onDuplicateTab && this.onDuplicateTab(tab) },
+      { label: 'Terminale SSH', icon: 'terminal', action: () => this.onTerminal && this.onTerminal(tab) },
       { label: 'Nota', icon: 'note', action: () => this.onNotes && this.onNotes(tab) },
       { divider: true },
       { label: 'Zoom −', icon: 'minus', keep: true, action: () => this.onZoom && this.onZoom(tab, -ZOOM_STEP) },

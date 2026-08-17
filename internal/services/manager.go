@@ -17,17 +17,34 @@ type ServiceManager struct {
 
 func NewServiceManager(cfg *config.Config) *ServiceManager {
 	sm := &ServiceManager{config: cfg}
-	
+	sm.rebuildClients(cfg)
+	return sm
+}
+
+// Reconfigure rebuilds the per-service clients from a (possibly updated)
+// config. It keeps the same logical instance so callers holding a pointer
+// (e.g. DashboardAPI) observe the new endpoints/auth without re-wiring.
+func (sm *ServiceManager) Reconfigure(cfg *config.Config) {
+	sm.config = cfg
+	sm.rebuildClients(cfg)
+}
+
+func (sm *ServiceManager) rebuildClients(cfg *config.Config) {
 	if svc, ok := cfg.GetService("neuronet"); ok {
 		sm.neuronet = NewNeuroNetClient(svc)
+	} else {
+		sm.neuronet = nil
 	}
 	if svc, ok := cfg.GetService("minecraft"); ok {
 		sm.minecraft = NewMinecraftClient(svc)
+	} else {
+		sm.minecraft = nil
 	}
 	if svc, ok := cfg.GetService("slotbuilder"); ok {
 		sm.slotbuilder = NewSlotBuilderClient(svc)
+	} else {
+		sm.slotbuilder = nil
 	}
-	return sm
 }
 
 func (sm *ServiceManager) CheckAllHealth(ctx context.Context) []models.ServiceStatus {

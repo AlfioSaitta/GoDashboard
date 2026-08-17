@@ -47,6 +47,28 @@ extern void exportSettingsMessage(const char *msg);
 extern void exportNotesMessage(const char *msg);
 extern void exportShellNotification(guint64 id, const char *title, const char *body);
 
+// Per-tab terminal (VTE) support. The actual terminal widgets and logic live in
+// terminal.go (same cgo amalgamation); tabs_shell.go only carries the request
+// channel for it. These are defined in terminal.go, declared here so the C in
+// this preamble (and the shell_req_cb switch) can call them.
+extern void shell_terminal_toggle(int id, const char *host, int port, const char *user,
+                                  const char *auth, const char *password,
+                                  const char *key, const char *dir, int split);
+extern void shell_terminal_open(int id, const char *host, int port, const char *user,
+                                const char *auth, const char *password,
+                                const char *key, const char *dir, int split);
+extern void shell_terminal_close(int id);
+extern void shell_terminal_restart(int id);
+extern void shell_terminal_destroy(int id);
+extern void shell_terminal_kill(int id);
+extern void shell_terminal_reset_state(int id);
+extern void shell_terminal_split(int id, int orient);
+
+// Path of the SSH_ASKPASS helper (written by Go in the portable data dir). Set
+// via shell_term_set_askpass(); read by terminal.go when spawning ssh with a
+// stored password.
+char *g_term_askpass = NULL;
+
 // Forward declaration (defined in the notification-permissions section below).
 static void shell_notif_permissions_install(void);
 
@@ -125,10 +147,16 @@ static void shell_setup(void)
 	shell_main_win = gtk_widget_get_toplevel(vbox);
 	g_object_unref(wv);
 
-	// Keep the area under the strip consistent with the dark chrome theme.
+	// Keep the area under the strip consistent with the dark chrome theme, and
+	// style the per-tab terminal header bar (native GTK widgets created lazily
+	// by terminal.go — CSS applies as soon as the widgets get their names).
 	GtkCssProvider *css = gtk_css_provider_new();
 	gtk_css_provider_load_from_data(css,
-		"#shell-stack { background-color: #10141d; }", -1, NULL);
+		"#shell-stack { background-color: #10141d; }"
+		"#term-bar { background-color: #161b26; border-top: 1px solid #2a3040; }"
+		"#term-bar label { color: #c9d1d9; font-family: monospace; font-size: 11px; padding: 3px 10px; }"
+		"#term-bar button { background: transparent; border: none; color: #8b949e; padding: 0 10px; min-width: 24px; min-height: 0; }"
+		"#term-bar button:hover { color: #e6edf3; background: #21262d; }", -1, NULL);
 	gtk_style_context_add_provider_for_screen(
 		gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
 		GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -188,15 +216,56 @@ static void shell_notif_permissions_install(void)
 		G_CALLBACK(shell_notif_init_permissions), NULL);
 }
 
-static WebKitWebView *shell_find_tab(int id)
+// Each tab lives inside a GtkBox stack child ("tab-<id>-box") that carries the
+// tab-id g_object data; the box holds the tab's WebKitWebView plus (lazily, when
+// the per-tab terminal is opened) the terminal header bar and the VTE terminal.
+// Not static: also called from terminal.go's cgo preamble (separate unit).
+GtkWidget *shell_find_tab_box(int id)
 {
 	if (!shell_stack)
 		return NULL;
 	GList *ch = gtk_container_get_children(GTK_CONTAINER(shell_stack));
-	WebKitWebView *hit = NULL;
+	GtkWidget *hit = NULL;
 	for (GList *l = ch; l && !hit; l = l->next) {
 		if (g_object_get_data(G_OBJECT(l->data), "tab-id") == GINT_TO_POINTER(id))
+			hit = GTK_WIDGET(l->data);
+	}
+	g_list_free(ch);
+	return hit;
+}
+
+// The per-tab GtkPaned that wraps the webview (child1) and, when the terminal
+// is open, the terminal box (child2). Created at tab creation in shell_show_tab.
+// Not static: also called from terminal.go's cgo preamble (separate unit).
+GtkWidget *shell_find_tab_paned(int id)
+{
+	GtkWidget *box = shell_find_tab_box(id);
+	if (!box)
+		return NULL;
+	return GTK_WIDGET(g_object_get_data(G_OBJECT(box), "term-paned"));
+}
+
+// Descend into the tab box to find its WebKitWebView. The webview always
+// lives inside the tab's GtkPaned (child1, see shell_show_tab); the paned is
+// stored as "term-paned" g_object_data on the box.
+WebKitWebView *shell_find_tab(int id)
+{
+	GtkWidget *box = shell_find_tab_box(id);
+	if (!box)
+		return NULL;
+	GList *ch = gtk_container_get_children(GTK_CONTAINER(box));
+	WebKitWebView *hit = NULL;
+	for (GList *l = ch; l && !hit; l = l->next) {
+		if (WEBKIT_IS_WEB_VIEW(l->data)) {
 			hit = WEBKIT_WEB_VIEW(l->data);
+		} else if (GTK_IS_PANED(l->data)) {
+			GList *pc = gtk_container_get_children(GTK_CONTAINER(l->data));
+			for (GList *m = pc; m && !hit; m = m->next) {
+				if (WEBKIT_IS_WEB_VIEW(m->data))
+					hit = WEBKIT_WEB_VIEW(m->data);
+			}
+			g_list_free(pc);
+		}
 	}
 	g_list_free(ch);
 	return hit;
@@ -313,14 +382,16 @@ void shell_notif_close_impl(guint64 id)
 	g_idle_add(shell_notif_close_idle, idp);
 }
 
-// Create (lazily) the webview of a tab and show it in the stack.
+// Create (lazily) the webview of a tab inside its box and show it in the stack.
 static void shell_show_tab(int id, const char *url, double zoom)
 {
 	if (!shell_stack)
 		return;
-	WebKitWebView *wv = shell_find_tab(id);
-	if (!wv) {
-		wv = WEBKIT_WEB_VIEW(webkit_web_view_new());
+	GtkWidget *box = shell_find_tab_box(id);
+	if (!box) {
+		box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+		g_object_set_data(G_OBJECT(box), "tab-id", GINT_TO_POINTER(id));
+		WebKitWebView *wv = WEBKIT_WEB_VIEW(webkit_web_view_new());
 		g_object_set_data(G_OBJECT(wv), "tab-id", GINT_TO_POINTER(id));
 		WebKitSettings *set = webkit_web_view_get_settings(wv);
 		webkit_settings_set_enable_developer_extras(set, TRUE);
@@ -329,29 +400,49 @@ static void shell_show_tab(int id, const char *url, double zoom)
 		g_signal_connect(G_OBJECT(wv), "permission-request", G_CALLBACK(shell_notif_permission), NULL);
 		g_signal_connect(G_OBJECT(wv), "show-notification", G_CALLBACK(shell_notif_shown), NULL);
 		gtk_widget_show(GTK_WIDGET(wv));
-		char name[32];
-		snprintf(name, sizeof name, "tab-%d", id);
-		gtk_stack_add_named(GTK_STACK(shell_stack), GTK_WIDGET(wv), name);
+		// The tab webview lives inside a GtkPaned (child1); the per-tab
+		// terminal is packed as child2 when opened (terminal.go). The webview
+		// is NEVER reparented: moving a realized/mapped WebKitWebView into a
+		// new container corrupts GTK's css/draw state (blank page + CSS
+		// assertion), so the paned is built here, at tab creation.
+		GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_VERTICAL);
+		gtk_widget_set_hexpand(paned, TRUE);
+		gtk_widget_set_vexpand(paned, TRUE);
+		g_object_set_data(G_OBJECT(box), "term-paned", paned);
+		gtk_paned_pack1(GTK_PANED(paned), GTK_WIDGET(wv), TRUE, FALSE);
+		gtk_box_pack_start(GTK_BOX(box), paned, TRUE, TRUE, 0);
+		gtk_widget_show(paned);
 		if (zoom > 0.01)
 			webkit_web_view_set_zoom_level(wv, zoom);
 		if (url && url[0])
 			webkit_web_view_load_uri(wv, url);
+		gtk_widget_show(GTK_WIDGET(box));
+		char name[32];
+		snprintf(name, sizeof name, "tab-%d", id);
+		gtk_stack_add_named(GTK_STACK(shell_stack), box, name);
 	}
-	gtk_stack_set_visible_child(GTK_STACK(shell_stack), GTK_WIDGET(wv));
-	if (zoom > 0.01)
+	gtk_stack_set_visible_child(GTK_STACK(shell_stack), box);
+	WebKitWebView *wv = shell_find_tab(id);
+	if (wv && zoom > 0.01)
 		webkit_web_view_set_zoom_level(wv, zoom);
-	gtk_widget_grab_focus(GTK_WIDGET(wv));
+	if (wv)
+		gtk_widget_grab_focus(GTK_WIDGET(wv));
 }
 
 static void shell_destroy_tab(int id)
 {
 	if (!shell_stack)
 		return;
-	WebKitWebView *wv = shell_find_tab(id);
-	if (!wv)
+	GtkWidget *box = shell_find_tab_box(id);
+	if (!box)
 		return;
-	gtk_container_remove(GTK_CONTAINER(shell_stack), GTK_WIDGET(wv));
-	gtk_widget_destroy(GTK_WIDGET(wv));
+	// Kill a running terminal session (ssh/shell) before tearing down the box;
+	// destroying the VTE widget would also close the pty, but an explicit
+	// SIGHUP makes the child exit promptly and predictably.
+	shell_terminal_kill(id);
+	shell_terminal_reset_state(id);
+	gtk_container_remove(GTK_CONTAINER(shell_stack), box);
+	gtk_widget_destroy(box);
 }
 
 static void shell_reorder(const int *ids, int n)
@@ -359,16 +450,16 @@ static void shell_reorder(const int *ids, int n)
 	if (!shell_stack)
 		return;
 	// GtkStack has no reorder_child in GTK3: rebuild the child set in order by
-	// removing then re-adding each webview (order = sequential add order).
+	// removing then re-adding each tab box (order = sequential add order).
 	for (int i = 0; i < n; i++) {
-		WebKitWebView *wv = shell_find_tab(ids[i]);
-		if (!wv)
+		GtkWidget *box = shell_find_tab_box(ids[i]);
+		if (!box)
 			continue;
-		int tid = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(wv), "tab-id"));
-		gtk_container_remove(GTK_CONTAINER(shell_stack), GTK_WIDGET(wv));
+		int tid = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(box), "tab-id"));
+		gtk_container_remove(GTK_CONTAINER(shell_stack), box);
 		char name[32];
 		snprintf(name, sizeof name, "tab-%d", tid);
-		gtk_stack_add_named(GTK_STACK(shell_stack), GTK_WIDGET(wv), name);
+		gtk_stack_add_named(GTK_STACK(shell_stack), box, name);
 	}
 }
 
@@ -1148,7 +1239,9 @@ static void shell_inspector(int mode, int tab_id)
 typedef struct {
 	int op;        // 0 setup, 1 show, 2 destroy, 3 reorder, 4 zoom,
 	               // 5 chrome height, 6 open settings, 7 close settings,
-	               // 8 inspector, 9 open notes, 10 close notes
+	               // 8 inspector, 9 open notes, 10 close notes,
+	               // 11 terminal toggle, 12 terminal open/close,
+	               // 13 terminal destroy, 14 terminal restart, 15 terminal split
 	int id;
 	double zoom;
 	int height;
@@ -1156,6 +1249,16 @@ typedef struct {
 	char *url;
 	int *ids;
 	int n;
+	// terminal fields (ops 11-15)
+	int term_visible;
+	char *term_host;
+	int term_port;
+	char *term_user;
+	char *term_auth;
+	char *term_password;
+	char *term_key;
+	char *term_dir;
+	int term_split;
 } shell_req;
 
 static gboolean shell_req_cb(gpointer data)
@@ -1180,9 +1283,27 @@ static gboolean shell_req_cb(gpointer data)
 	case 8: shell_inspector(req->op_extra, req->id); break;
 	case 9: shell_open_notes(req->id); break;
 	case 10: shell_close_notes(); break;
+	case 11: shell_terminal_toggle(req->id, req->term_host, req->term_port, req->term_user,
+		req->term_auth, req->term_password, req->term_key, req->term_dir, req->term_split); break;
+	case 12:
+		if (req->term_visible)
+			shell_terminal_open(req->id, req->term_host, req->term_port, req->term_user,
+				req->term_auth, req->term_password, req->term_key, req->term_dir, req->term_split);
+		else
+			shell_terminal_close(req->id);
+		break;
+	case 13: shell_terminal_destroy(req->id); break;
+	case 14: shell_terminal_restart(req->id); break;
+	case 15: shell_terminal_split(req->id, req->term_split); break;
 	}
 	if (req->url) g_free(req->url);
 	if (req->ids) g_free(req->ids);
+	if (req->term_host) g_free(req->term_host);
+	if (req->term_user) g_free(req->term_user);
+	if (req->term_auth) g_free(req->term_auth);
+	if (req->term_password) g_free(req->term_password);
+	if (req->term_key) g_free(req->term_key);
+	if (req->term_dir) g_free(req->term_dir);
 	g_free(req);
 	return G_SOURCE_REMOVE;
 }
@@ -1203,6 +1324,34 @@ static void shell_request(int op, int id, const char *url, double zoom, int heig
 		memcpy(req->ids, ids, sizeof(int) * (size_t)n);
 	}
 	g_idle_add(shell_req_cb, req);
+}
+
+// Enqueue a terminal request (ops 11-14). All strings are strdup'ed immediately
+// (the Go caller may free its C strings right after this returns).
+void shell_term_request(int op, int id, int visible, const char *host, int port,
+                        const char *user, const char *auth, const char *password,
+                        const char *key, const char *dir, int split)
+{
+	shell_req *req = g_new0(shell_req, 1);
+	req->op = op;
+	req->id = id;
+	req->term_visible = visible;
+	req->term_host = host ? g_strdup(host) : NULL;
+	req->term_port = port;
+	req->term_user = user ? g_strdup(user) : NULL;
+	req->term_auth = auth ? g_strdup(auth) : NULL;
+	req->term_password = password ? g_strdup(password) : NULL;
+	req->term_key = key ? g_strdup(key) : NULL;
+	req->term_dir = dir ? g_strdup(dir) : NULL;
+	req->term_split = split;
+	g_idle_add(shell_req_cb, req);
+}
+
+// Store the SSH_ASKPASS helper path (written by Go in the portable data dir).
+void shell_term_set_askpass(const char *path)
+{
+	g_free(g_term_askpass);
+	g_term_askpass = path ? g_strdup(path) : NULL;
 }
 */
 import "C"

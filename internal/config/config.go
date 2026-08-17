@@ -31,6 +31,18 @@ type ServiceEndpoint struct {
 	Config      string `yaml:"config,omitempty"`
 }
 
+type TerminalConfig struct {
+	Enabled     bool   `yaml:"enabled,omitempty"`
+	Host        string `yaml:"host,omitempty"`
+	Port        int    `yaml:"port,omitempty"`
+	User        string `yaml:"user,omitempty"`
+	Auth        string `yaml:"auth,omitempty"`        // password | key | agent (default: agent)
+	PasswordEnv string `yaml:"password_env,omitempty"` // env var name holding the SSH password
+	KeyPath     string `yaml:"key_path,omitempty"`     // path to the private key file
+	Dir         string `yaml:"dir,omitempty"`          // local working dir for the shell fallback
+	Split       string `yaml:"split,omitempty"`        // "v" terminal below the page | "h" terminal to the right (default: "")
+}
+
 type ServiceConfig struct {
 	Name           string          `yaml:"name"`
 	BaseURL        string          `yaml:"base_url"`
@@ -39,6 +51,7 @@ type ServiceConfig struct {
 	AdminPath      string          `yaml:"admin_path,omitempty"`
 	APIPrefix      string          `yaml:"api_prefix"`
 	Auth           AuthConfig      `yaml:"auth"`
+	Terminal       TerminalConfig  `yaml:"terminal,omitempty"`
 	TimeoutSeconds int             `yaml:"timeout_seconds"`
 	ProxyEnabled   bool            `yaml:"proxy_enabled"`
 	Endpoints      ServiceEndpoint `yaml:"endpoints"`
@@ -114,6 +127,7 @@ func DefaultConfig() *Config {
 				AdminPath:     "/admin",
 				APIPrefix:     "/api",
 				Auth:          AuthConfig{Type: "none"},
+				Terminal:      TerminalConfig{Enabled: true, Host: "localhost", Port: 22, User: "root", Auth: "agent"},
 				TimeoutSeconds: 30,
 				ProxyEnabled:  true,
 				Endpoints: ServiceEndpoint{
@@ -128,6 +142,7 @@ func DefaultConfig() *Config {
 				BaseURL:       "http://51.75.77.248:9800",
 				APIPrefix:     "/api",
 				Auth:          AuthConfig{Type: "basic", UsernameEnv: "MINECRAFT_USER", PasswordEnv: "MINECRAFT_PASS"},
+				Terminal:      TerminalConfig{Enabled: true, Host: "51.75.77.248", Port: 22, User: "root", Auth: "agent"},
 				TimeoutSeconds: 15,
 				ProxyEnabled:  true,
 				Endpoints: ServiceEndpoint{
@@ -143,6 +158,7 @@ func DefaultConfig() *Config {
 				FrontendURL:    "https://7casinogames.com",
 				APIPrefix:      "/api",
 				Auth:           AuthConfig{Type: "bearer", TokenEnv: "SLOTBUILDER_TOKEN"},
+				Terminal:       TerminalConfig{Enabled: true, Host: "backoffice.7casinogames.com", Port: 22, User: "root", Auth: "agent"},
 				TimeoutSeconds: 30,
 				ProxyEnabled:   true,
 				Endpoints: ServiceEndpoint{

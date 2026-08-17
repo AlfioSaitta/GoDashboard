@@ -11,6 +11,12 @@ services:
             type: basic
             username_env: MINECRAFT_USER
             password_env: MINECRAFT_PASS
+        terminal:
+            enabled: true
+            host: 51.75.77.248
+            port: 22
+            user: root
+            auth: agent
         timeout_seconds: 15
         proxy_enabled: true
         endpoints:
@@ -25,6 +31,12 @@ services:
         api_prefix: /api
         auth:
             type: none
+        terminal:
+            enabled: true
+            host: localhost
+            port: 22
+            user: root
+            auth: agent
         timeout_seconds: 30
         proxy_enabled: true
         endpoints:
@@ -41,6 +53,12 @@ services:
         auth:
             type: bearer
             token_env: SLOTBUILDER_TOKEN
+        terminal:
+            enabled: true
+            host: backoffice.7casinogames.com
+            port: 22
+            user: root
+            auth: agent
         timeout_seconds: 30
         proxy_enabled: true
         endpoints:

@@ -33,6 +33,8 @@ const settingsApi = {
   getTheme: () => call('getTheme'),
   getSystemTheme: () => call('getSystemTheme'),
   setTheme: (theme) => call('setTheme', theme),
+  getAppConfig: () => call('getAppConfig'),
+  saveAppConfig: (patch) => call('saveAppConfig', patch),
   getTabs: () => call('getTabs'),
   saveTabConfig: (config) => call('saveTabConfig', config),
   removeTab: (id) => call('removeTab', String(id)),
@@ -83,7 +85,7 @@ async function mount() {
 
   const refreshList = async () => {
     try {
-      settingsModal.open(await settingsApi.getTabs())
+      settingsModal.open(await settingsApi.getTabs(), await settingsApi.getAppConfig())
     } catch (error) {
       console.error('Failed to load tabs:', error)
     }
@@ -159,6 +161,17 @@ async function mount() {
       await settingsApi.saveNotes(tabId, notes)
       settingsApi.tabsChanged().catch(() => {})
     },
+    onSaveService: async (serviceKey, patch) => {
+      await settingsApi.saveAppConfig({ services: { [serviceKey]: patch } })
+      settingsApi.tabsChanged().catch(() => {})
+      await refreshList()
+    },
+    onSaveGlobal: async (patch) => {
+      await settingsApi.saveAppConfig(patch)
+      settingsApi.tabsChanged().catch(() => {})
+      await refreshList()
+    },
+    onFit: scheduleFit,
     onClose: () => {
       settingsApi.closeSettings().catch(() => {})
     },

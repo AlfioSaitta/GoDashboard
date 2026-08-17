@@ -27,12 +27,25 @@ func NewProxyService(cfg *config.Config) *ProxyService {
 	ps := &ProxyService{
 		config: cfg,
 		proxies: make(map[string]*httputil.ReverseProxy),
-		client: &http.Client{
-			Timeout: time.Duration(cfg.Proxy.TimeoutSeconds) * time.Second,
-		},
 		cookies: cookie.New(),
 	}
-	
+	ps.rebuild(cfg)
+	return ps
+}
+
+// Reconfigure re-applies a (possibly updated) config: it rebuilds the reverse
+// proxies and client for the new hosts/timeouts while KEEPING the persistent
+// cookie store, so sessions captured so far survive a settings change.
+func (ps *ProxyService) Reconfigure(cfg *config.Config) {
+	ps.config = cfg
+	ps.rebuild(cfg)
+}
+
+func (ps *ProxyService) rebuild(cfg *config.Config) {
+	ps.client = &http.Client{
+		Timeout: time.Duration(cfg.Proxy.TimeoutSeconds) * time.Second,
+	}
+	ps.proxies = make(map[string]*httputil.ReverseProxy)
 	for _, host := range cfg.Proxy.AllowedHosts {
 		target, _ := url.Parse("http://" + host)
 		if strings.HasPrefix(host, "https://") || strings.HasSuffix(host, "443") {
@@ -44,8 +57,6 @@ func NewProxyService(cfg *config.Config) *ProxyService {
 		proxy.ErrorHandler = ps.errorHandler
 		ps.proxies[host] = proxy
 	}
-	
-	return ps
 }
 
 type customTransport struct {

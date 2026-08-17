@@ -128,6 +128,28 @@ export const api = {
     return wails.CloseNotesNoContext()
   },
 
+  // Per-tab SSH terminal (native VTE in the tab box).
+  async terminalToggle(tabId) {
+    return wails.TerminalToggleNoContext(Number(tabId))
+  },
+
+  async terminalOpen(tabId) {
+    return wails.TerminalOpenNoContext(Number(tabId))
+  },
+
+  async terminalClose(tabId) {
+    return wails.TerminalCloseNoContext(Number(tabId))
+  },
+
+  async terminalRestart(tabId) {
+    return wails.TerminalRestartNoContext(Number(tabId))
+  },
+
+  // Split orientation for the per-tab terminal: "h" (horizontal) or "v" (vertical).
+  async terminalSplit(tabId, orient) {
+    return wails.TerminalSplitNoContext(Number(tabId), orient)
+  },
+
   async tabsChanged() {
     return wails.TabsChangedNoContext()
   },

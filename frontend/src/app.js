@@ -297,6 +297,9 @@ async function mountChrome() {
     onZoom: (tab, delta) => setTabZoom(tab, zoomOf(tab) + delta),
     onResetZoom: (tab) => setTabZoom(tab, 1),
     onNotes: (tab) => openNotes(tab),
+    onTerminal: (tab) => {
+      api.terminalToggle(tab.id).catch(err => console.error('Failed to toggle terminal:', err))
+    },
     onPopupChange: (open) => { if (open) expandStrip(); else collapseStrip() },
   })
 

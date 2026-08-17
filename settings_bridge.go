@@ -123,6 +123,19 @@ func dispatchSettings(a *App, method string, args []interface{}) (interface{}, e
 	case "getTabs":
 		return a.tabAPI.ListTabs(ctx)
 
+	case "getAppConfig":
+		return a.GetAppConfig(), nil
+
+	case "saveAppConfig":
+		if len(args) < 1 {
+			return nil, fmt.Errorf("argomenti mancanti")
+		}
+		patch, err := asMap(args[0])
+		if err != nil {
+			return nil, err
+		}
+		return nil, a.SaveAppConfig(patch)
+
 	case "getTheme":
 		return a.GetThemeNoContext(), nil
 

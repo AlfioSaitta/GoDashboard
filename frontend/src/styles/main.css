@@ -326,6 +326,39 @@ button:focus:not(:focus-visible) {
   color: var(--accent);
 }
 
+/* Per-tab SSH terminal access button (next to the pill, before the note btn) */
+
+.tab-terminal-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-left: -2px;
+  padding: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  border: none;
+  border-radius: 9999px;
+  cursor: pointer;
+  opacity: 0.55;
+  flex-shrink: 0;
+  transition: all var(--transition);
+}
+
+.tab-terminal-btn svg {
+  pointer-events: none;
+}
+
+.tab-bar-item:hover .tab-terminal-btn {
+  opacity: 1;
+}
+
+.tab-terminal-btn:hover {
+  color: var(--accent);
+  background: var(--accent-bg);
+}
+
 /* Drag & drop */
 
 .tab-bar-item.dragging {
@@ -1795,6 +1828,275 @@ body.notes-mode.dash-transparent .notes-card {
 .tab-item-actions .btn-icon {
   width: 30px;
   height: 30px;
+}
+
+/* Settings-window section navigation + cards (native settings window) */
+
+.settings-nav {
+  display: flex;
+  gap: 0.35rem;
+  padding: 0 1.25rem 0.4rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+.settings-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.5rem 0.9rem;
+  border: 1px solid transparent;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-secondary);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.settings-nav-btn:hover {
+  background: var(--bg-hover);
+  color: var(--fg-primary);
+}
+
+.settings-nav-btn.active {
+  background: var(--accent-bg);
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+
+.settings-card {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem 1.1rem;
+  margin-bottom: 1rem;
+}
+
+.settings-card:last-child {
+  margin-bottom: 0;
+}
+
+.settings-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 650;
+  color: var(--fg-primary);
+  margin-bottom: 0.85rem;
+}
+
+.settings-card h3 svg {
+  color: var(--accent);
+}
+
+.settings-hint {
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+  margin-bottom: 1rem;
+  line-height: 1.45;
+}
+
+.settings-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.85rem;
+}
+
+.settings-card-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.85rem;
+  font-weight: 650;
+  color: var(--fg-primary);
+  margin: 0;
+}
+
+.settings-card-head h3 svg {
+  color: var(--accent);
+}
+
+.btn-sm {
+  padding: 0.35rem 0.7rem;
+  font-size: 0.75rem;
+}
+
+.service-subhead {
+  font-size: 0.75rem;
+  font-weight: 650;
+  color: var(--fg-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 1.1rem 0 0.55rem;
+  padding-top: 0.75rem;
+  border-top: 1px dashed var(--border);
+}
+
+.service-edit-panel {
+  display: block;
+  background: var(--bg-secondary);
+  border: 1px solid var(--accent-border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin-left: 0.5rem;
+  margin-right: 0.5rem;
+}
+
+.service-edit-panel.is-new {
+  border-color: var(--border-strong);
+}
+
+.service-edit-panel .form-row {
+  margin-bottom: 0;
+}
+
+.input.is-readonly,
+input.is-readonly {
+  opacity: 0.65;
+  cursor: not-allowed;
+  background: var(--bg-hover);
+}
+
+.service-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.service-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-secondary);
+  overflow: hidden;
+}
+
+.service-card.open {
+  border-color: var(--accent-border);
+}
+
+.service-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  width: 100%;
+  padding: 0.7rem 0.9rem;
+  background: transparent;
+  border: none;
+  color: var(--fg-primary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-align: left;
+}
+
+.service-toggle:hover {
+  background: var(--bg-hover);
+}
+
+.service-icon {
+  display: inline-flex;
+  color: var(--accent);
+  flex-shrink: 0;
+}
+
+.service-title {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.service-key {
+  flex: 1;
+  font-size: 0.72rem;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.service-chevron {
+  display: inline-flex;
+  color: var(--fg-muted);
+  flex-shrink: 0;
+}
+
+.service-body {
+  padding: 0.9rem 1rem 1.1rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+.service-body h4 {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-top: 0.4rem;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+}
+
+.service-body h4::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.form-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+
+.form-toggle label {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  cursor: pointer;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--fg-secondary);
+}
+
+/* textareas (URL lists etc.) reuse the group skin via .form-group below */
+
+.form-group textarea {
+  width: 100%;
+  padding: 0.55rem 0.7rem;
+  background: var(--bg-primary);
+  color: var(--fg-primary);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  line-height: 1.5;
+  resize: vertical;
+}
+
+.form-group textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-bg);
+}
+
+.form-group textarea::placeholder {
+  color: var(--fg-muted);
+}
+
+.modal-error.toast {
+  color: var(--success);
+  background: rgba(5, 150, 105, 0.1);
+  border-color: rgba(5, 150, 105, 0.3);
 }
 
 /* Per-tab display settings panel (zoom / toolbar) */
