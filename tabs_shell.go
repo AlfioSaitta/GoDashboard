@@ -467,8 +467,6 @@ static void shell_open_settings(void)
 		return;
 	}
 
-	char *url = settings_page_url();
-
 	g_shell_settings_win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_title(GTK_WINDOW(g_shell_settings_win), "Impostazioni");
 	gtk_window_set_default_size(GTK_WINDOW(g_shell_settings_win), 900, 720);
@@ -476,6 +474,11 @@ static void shell_open_settings(void)
 	// (settings_drag_press asks the page via elementFromPoint).
 	gtk_window_set_decorated(GTK_WINDOW(g_shell_settings_win), FALSE);
 	settings_enable_transparency();
+	// Build the page URL AFTER transparency is decided: settings_page_url()
+	// appends ?t=1 only when the shim enabled window transparency, and reading
+	// g_settings_transparent before enable_transparency() (still 0 on the first
+	// open in a fresh process) would give the page the flat dict background.
+	char *url = settings_page_url();
 	// NOT modal: a modal grab blocks dragging/clicking the main window while the
 	// settings card is open. Transient + raise-above keeps the card in front of
 	// the chrome while both windows stay interactive.
@@ -785,14 +788,18 @@ static void shell_open_notes(int tab_id)
 		return;
 	}
 
-	char *url = notes_page_url(tab_id);
-
 	g_shell_notes_win = gtk_window_new(GTK_WINDOW_TOPLEVEL);
 	gtk_window_set_title(GTK_WINDOW(g_shell_notes_win), "Note");
 	gtk_window_set_default_size(GTK_WINDOW(g_shell_notes_win), 520, 480);
 	// Frameless like the main/settings windows; dragged on the card header.
 	gtk_window_set_decorated(GTK_WINDOW(g_shell_notes_win), FALSE);
 	notes_enable_transparency();
+	// Build the page URL AFTER transparency is decided (same ordering fix as the
+	// settings window): notes_page_url() appends &t=1 only when the shim enabled
+	// window transparency, and reading g_notes_transparent before
+	// notes_enable_transparency() (still 0 on first open) would give the page the
+	// flat opaque background.
+	char *url = notes_page_url(tab_id);
 	// NOT modal: like the settings window, transient + raise-above keeps the
 	// card in front while the main window stays fully usable and clickable.
 	if (shell_main_win) {
