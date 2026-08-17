@@ -29,8 +29,16 @@ type Handler struct {
 	ShowWindow func()
 	// ToggleWindow shows/hides the main window.
 	ToggleWindow func()
+	// ShowTab switches to the given tab (showing the window first).
+	ShowTab func(id int)
 	// Quit terminates the application.
 	Quit func()
+}
+
+// TabItem is a single tab entry shown in the tray menu.
+type TabItem struct {
+	ID   int
+	Name string
 }
 
 type iconPixmap struct {
@@ -72,7 +80,7 @@ func New(h *Handler) (*SNI, error) {
 	if h == nil {
 		h = &Handler{}
 	}
-	s.menu = &menu{toggle: h.ToggleWindow, quit: h.Quit}
+	s.menu = &menu{toggle: h.ToggleWindow, showTab: h.ShowTab, quit: h.Quit}
 	if err := conn.Export(s.menu, menuObj, menuIface); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("export menu: %w", err)
@@ -82,7 +90,7 @@ func New(h *Handler) (*SNI, error) {
 		return nil, fmt.Errorf("export menu props: %w", err)
 	}
 
-	s.busName = fmt.Sprintf("org.kde.StatusNotifierItem-%d-%d", os.Getpid(), os.Getppid())
+	s.busName = fmt.Sprintf("org.kde.StatusNotifierItem-%d-1", os.Getpid())
 	if _, err := conn.RequestName(s.busName, dbus.NameFlagDoNotQueue); err != nil {
 		s.Close()
 		return nil, fmt.Errorf("request name %s: %w", s.busName, err)
@@ -111,6 +119,26 @@ func (s *SNI) Close() {
 // BusName returns the D-Bus name the tray icon is registered under.
 func (s *SNI) BusName() string {
 	return s.busName
+}
+
+// SetTabs updates the tab list shown in the tray context menu and tells the
+// host (StatusNotifierWatcher rendered menu) to refetch the layout.
+func (s *SNI) SetTabs(items []TabItem) {
+	s.mu.Lock()
+	menu := s.menu
+	conn := s.conn
+	s.mu.Unlock()
+	if menu == nil {
+		return
+	}
+	ti := make([]tabItem, 0, len(items))
+	for _, it := range items {
+		ti = append(ti, tabItem{ID: it.ID, Name: it.Name})
+	}
+	menu.SetTabs(ti)
+	if conn != nil {
+		_ = conn.Emit(menuObj, menuIface+".LayoutUpdated", menu.revision())
+	}
 }
 
 // --- org.kde.StatusNotifierItem methods ---

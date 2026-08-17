@@ -9,37 +9,103 @@ import (
 const (
 	itemShowHide = int32(1)
 	itemQuit     = int32(2)
+	sepTabs      = int32(10)
+	sepQuit      = int32(11)
+	firstTabItem = int32(100)
 )
 
-// menu implements the DBusMenu protocol at /MenuBar for the tray item.
-type menu struct {
-	toggle func()
-	quit   func()
-	mu     sync.Mutex
+// tabItem is a single tab entry shown in the tray menu.
+type tabItem struct {
+	ID   int
+	Name string
 }
 
-type menuEntry struct {
+// menuLayout is a single node of the DBusMenu GetLayout response. The D-Bus
+// signature is (ia{sv}av): unique id, properties dict, child nodes (as
+// variants containing another (ia{sv}av) struct). The root node has id 0 and
+// its children are the top-level menu entries.
+type menuLayout struct {
 	ID       int32
 	Props    map[string]dbus.Variant
-	Children []byte
+	Children []dbus.Variant
 }
 
+// groupEntry is an (id, properties) pair used by GetGroupProperties and
+// ItemsProperties.
 type groupEntry struct {
 	ID    int32
 	Props map[string]dbus.Variant
 }
 
-type menuLayout struct {
-	Entries []menuEntry
+// menu implements the DBusMenu protocol at /MenuBar for the tray item.
+type menu struct {
+	toggle  func()
+	showTab func(int)
+	quit    func()
+	mu      sync.RWMutex
+	tabs    []tabItem
+	rev     uint32
+}
+
+type menuEntry struct {
+	ID    int32
+	Props map[string]dbus.Variant
+}
+
+// --- revision ---
+
+func (m *menu) revision() uint32 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.rev
+}
+
+func (m *menu) bumpRevision() uint32 {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.rev++
+	return m.rev
 }
 
 // --- helper accessors ---
 
 func (m *menu) entries() []menuEntry {
-	return []menuEntry{
+	m.mu.RLock()
+	tabs := make([]tabItem, len(m.tabs))
+	copy(tabs, m.tabs)
+	m.mu.RUnlock()
+
+	entries := []menuEntry{
 		{ID: itemShowHide, Props: menuItemProps("Mostra/Nascondi")},
-		{ID: itemQuit, Props: menuItemProps("Esci")},
 	}
+	if len(tabs) > 0 {
+		entries = append(entries, menuEntry{ID: sepTabs, Props: separatorProps()})
+		for i, t := range tabs {
+			entries = append(entries, menuEntry{ID: firstTabItem + int32(i), Props: menuItemProps(t.Name)})
+		}
+		entries = append(entries, menuEntry{ID: sepQuit, Props: separatorProps()})
+	}
+	entries = append(entries, menuEntry{ID: itemQuit, Props: menuItemProps("Esci")})
+	return entries
+}
+
+// rootLayout builds the GetLayout response root node. The root carries the
+// "children-display" property required by hosts (libdbusmenu/KDE) to render the
+// entries as a submenu; recursionDepth==0 asks for the root without children.
+func (m *menu) rootLayout(recursionDepth int32) menuLayout {
+	root := menuLayout{
+		ID: 0,
+		Props: map[string]dbus.Variant{
+			"children-display": dbus.MakeVariant("submenu"),
+		},
+	}
+	if recursionDepth == 0 {
+		return root
+	}
+	for _, e := range m.entries() {
+		root.Children = append(root.Children, dbus.MakeVariant(menuLayout{ID: e.ID, Props: e.Props}))
+	}
+	return root
 }
 
 func menuItemProps(label string) map[string]dbus.Variant {
@@ -50,10 +116,47 @@ func menuItemProps(label string) map[string]dbus.Variant {
 	}
 }
 
+func separatorProps() map[string]dbus.Variant {
+	return map[string]dbus.Variant{
+		"label":   dbus.MakeVariant(""),
+		"enabled": dbus.MakeVariant(false),
+		"type":    dbus.MakeVariant("separator"),
+	}
+}
+
+// SetTabs replaces the tab list shown in the tray menu and bumps the layout
+// revision so hosts refetch it.
+func (m *menu) SetTabs(tabs []tabItem) {
+	m.mu.Lock()
+	m.tabs = append([]tabItem(nil), tabs...)
+	m.rev++
+	m.mu.Unlock()
+}
+
+// tabForID maps a D-Bus menu item id back to the tab it represents.
+func (m *menu) tabForID(id int32) (tabItem, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	idx := int(id - firstTabItem)
+	if idx < 0 || idx >= len(m.tabs) {
+		return tabItem{}, false
+	}
+	return m.tabs[idx], true
+}
+
 // --- com.canonical.dbusmenu methods ---
 
-func (m *menu) GetLayout(parentID, recursionDepth int32, propNames []string) (uint32, dbus.Variant, *dbus.Error) {
-	return 0, dbus.MakeVariant(menuLayout{Entries: m.entries()}), nil
+// GetLayout returns the root menu node. The D-Bus out signature MUST be
+// (u(ia{sv}av)): revision + the layout struct WITHOUT a variant wrapper.
+// KDE/Qt importers (KF DBusMenuImporter, Qt QDBusMenuAdaptor) demarshal the
+// reply as QDBusPendingReply<uint, DBusMenuLayoutItem>; returning the layout
+// inside a dbus.Variant (uv) breaks their demarshalling and the tray menu
+// silently never appears on Plasma.
+func (m *menu) GetLayout(parentID, recursionDepth int32, propNames []string) (uint32, menuLayout, *dbus.Error) {
+	if parentID != 0 {
+		return m.revision(), menuLayout{ID: parentID}, nil
+	}
+	return m.revision(), m.rootLayout(recursionDepth), nil
 }
 
 func (m *menu) GetGroupProperties(ids []int32, propNames []string) ([]groupEntry, *dbus.Error) {
@@ -101,14 +204,18 @@ func (m *menu) Event(id int32, event string, data dbus.Variant, timestamp uint64
 	if event != "clicked" {
 		return nil
 	}
-	switch id {
-	case itemShowHide:
+	switch {
+	case id == itemShowHide:
 		if m.toggle != nil {
 			go m.toggle()
 		}
-	case itemQuit:
+	case id == itemQuit:
 		if m.quit != nil {
 			go m.quit()
+		}
+	case id >= firstTabItem:
+		if t, ok := m.tabForID(id); ok && m.showTab != nil {
+			go m.showTab(t.ID)
 		}
 	}
 	return nil

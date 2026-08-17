@@ -148,12 +148,14 @@ func (a *App) Startup(ctx context.Context) {
 	a.setWindowVisible(true)
 
 	a.tray, _ = tray.New(&tray.Handler{
-		ShowWindow:  a.ShowWindow,
+		ShowWindow:   a.ShowWindow,
 		ToggleWindow: a.ToggleWindow,
-		Quit:        func() { wailsRuntime.Quit(a.ctx) },
+		ShowTab:      a.ShowTabFromTray,
+		Quit:         func() { wailsRuntime.Quit(a.ctx) },
 	})
 	if a.tray != nil {
 		logger.Printf("Tray icon registered as %s", a.tray.BusName())
+		a.refreshTrayTabs()
 	} else {
 		logger.Printf("Tray icon unavailable on this session")
 	}
@@ -253,6 +255,38 @@ func (a *App) ToggleWindow() {
 		wailsRuntime.WindowUnminimise(a.ctx)
 		wailsRuntime.WindowShow(a.ctx)
 	}
+}
+
+// ShowTabFromTray shows the main window and switches to the tab with the given
+// id (used by the tray context menu). It also emits "shell:tab-activated" so
+// the chrome strip highlights the tab in the tab bar.
+func (a *App) ShowTabFromTray(id int) {
+	a.ShowWindow()
+	a.ShellShowTab(context.Background(), id)
+	if a.ctx != nil {
+		wailsRuntime.EventsEmit(a.ctx, "shell:tab-activated", map[string]interface{}{"tabId": id})
+	}
+}
+
+// refreshTrayTabs syncs the tab list shown in the tray context menu with the
+// current persistent tabs.
+func (a *App) refreshTrayTabs() {
+	if a.tray == nil || a.tabManager == nil {
+		return
+	}
+	tabs := a.tabManager.List()
+	items := make([]tray.TabItem, 0, len(tabs))
+	for _, t := range tabs {
+		name := t.Title
+		if name == "" {
+			name = t.URL
+		}
+		if name == "" {
+			name = fmt.Sprintf("Tab %d", t.ID)
+		}
+		items = append(items, tray.TabItem{ID: t.ID, Name: name})
+	}
+	a.tray.SetTabs(items)
 }
 
 // GetSystemTheme returns "dark" or "light" based on the KDE Plasma color scheme.

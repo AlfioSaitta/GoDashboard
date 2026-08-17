@@ -304,6 +304,13 @@ async function mountChrome() {
   // notes bridge + tabs_shell.go notes window); the chrome only refreshes the
   // note indicator via the "tabs:changed" event after a save.
 
+  // A tab was activated outside the chrome (e.g. from the tray context menu):
+  // highlight it in the tab bar and re-assert the shell tab.
+  runtime.EventsOn('shell:tab-activated', (data) => {
+    if (!data || data.tabId == null) return
+    switchTab(data.tabId)
+  })
+
   // Native webviews report their page title; show it transiently on the tab.
   runtime.EventsOn('shell:title', (data) => {
     if (!data || data.tabId == null) return

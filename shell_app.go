@@ -142,9 +142,10 @@ func (a *App) CloseSettingsNoContext() {
 }
 
 // TabsChanged notifies the chrome strip that the tab list changed (used by the
-// settings window after save/update/remove/reorder).
+// settings window after save/update/remove/reorder) and syncs the tray menu.
 func (a *App) TabsChanged(ctx context.Context) {
 	logger.Printf("TabsChanged")
+	a.refreshTrayTabs()
 	wailsRuntime.EventsEmit(a.ctx, "tabs:changed")
 }
 

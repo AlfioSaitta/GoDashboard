@@ -211,6 +211,16 @@ D-Bus StatusNotifierItem on the session bus (no appindicator CGO dependency).
 Implements `org.kde.StatusNotifierItem` + `com.canonical.dbusmenu`. Tray icon is the
 themed `"dashboard"` icon (installed by build/install-desktop.sh). Shows/hides/focuses
 the window; `Quit` closes. `OpenExternal(url)` in main.go uses `xdg-open`.
+- **Menu**: `GetLayout` MUST reply as `(u(ia{sv}av))` — the root layout struct
+  returned DIRECTLY (a `dbus.Variant` wrapper breaks KF/Qt importers: "Could not
+  find DBusMenu interface"), root carries `children-display: submenu`, children
+  are variants of `(ia{sv}av)`; `menu_test.go` locks the signature.
+- **Tab activation from tray**: `App.ShowTabFromTray(id)` (handler `ShowTab` on
+  the `tray.Handler`) shows the window, calls `ShellShowTab(id)` and emits the
+  wails event `shell:tab-activated` `{tabId}` so the chrome tab bar highlights
+  the newly active tab (app.js `switchTab`). `SetTabs` syncs the tab list into
+  the menu (called on startup + `TabsChanged`) and emits `LayoutUpdated` with a
+  bumped revision.
 
 ## Frontend Architecture
 
