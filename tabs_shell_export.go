@@ -73,3 +73,24 @@ func exportNotesMessage(msg *C.char) {
 	}
 	handleNotesMessage(C.GoString(msg))
 }
+
+// exportShellNotification is called by the C shim (on the GTK main thread)
+// whenever a tab page displays a Web Notification. The notification is shown
+// on the desktop via D-Bus org.freedesktop.Notifications (see internal/notify).
+//
+//export exportShellNotification
+func exportShellNotification(id C.ulong, title, body *C.char) {
+	t := ""
+	if title != nil {
+		t = C.GoString(title)
+	}
+	b := ""
+	if body != nil {
+		b = C.GoString(body)
+	}
+	if activeApp != nil {
+		activeApp.showTabNotification(uint64(id), t, b)
+	} else {
+		logger.Printf("tab notification dropped (app not ready): id=%d title=%q", uint64(id), t)
+	}
+}

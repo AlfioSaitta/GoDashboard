@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"dashboard/internal/api"
 	"dashboard/internal/config"
 	"dashboard/internal/cookie"
+	"dashboard/internal/notify"
 	"dashboard/internal/paths"
 	"dashboard/internal/services"
 	"dashboard/internal/tab"
@@ -89,6 +91,10 @@ type App struct {
 	tray        *tray.SNI
 	visMu       sync.RWMutex
 	windowVisible bool
+	notifier    *notify.Notifier
+	notifMu     sync.Mutex
+	notifMap    map[uint64]uint32 // webkit notification id -> desktop notification id
+	notifRev    map[uint32]uint64 // desktop notification id -> webkit notification id
 }
 
 func NewApp() *App {
@@ -124,6 +130,8 @@ func NewApp() *App {
 		tabManager:   tabManager,
 		cookieStore:  cookieStore,
 		cookieAPI:    cookieAPI,
+		notifMap:     map[uint64]uint32{},
+		notifRev:     map[uint32]uint64{},
 	}
 }
 
@@ -160,6 +168,13 @@ func (a *App) Startup(ctx context.Context) {
 		logger.Printf("Tray icon unavailable on this session")
 	}
 
+	if n, err := notify.New(); err != nil {
+		logger.Printf("Desktop notifications unavailable: %v", err)
+	} else {
+		a.notifier = n
+		logger.Printf("Desktop notification support enabled")
+	}
+
 	wailsRuntime.EventsOn(ctx, "shutdown", func(data ...interface{}) {
 		logger.Printf("Shutdown event received")
 		closeLogging()
@@ -178,6 +193,10 @@ func (a *App) Shutdown(ctx context.Context) {
 	if a.tray != nil {
 		a.tray.Close()
 		a.tray = nil
+	}
+	if a.notifier != nil {
+		a.notifier.Close()
+		a.notifier = nil
 	}
 	logger.Printf("App.Shutdown called")
 	closeLogging()
@@ -266,6 +285,103 @@ func (a *App) ShowTabFromTray(id int) {
 	if a.ctx != nil {
 		wailsRuntime.EventsEmit(a.ctx, "shell:tab-activated", map[string]interface{}{"tabId": id})
 	}
+}
+
+// showTabNotification displays a Web Notification raised by a tab page on the
+// desktop (via D-Bus org.freedesktop.Notifications). Called from the C shell on
+// the GTK main thread; the D-Bus roundtrip happens off-thread so the UI never
+// blocks. When the desktop notification is dismissed, the page's onclose fires
+// (webkit_notification_close on the GTK thread).
+func (a *App) showTabNotification(webID uint64, title, body string) {
+	logger.Printf("Tab notification: id=%d title=%q body=%q", webID, title, body)
+	n := a.notifier
+	if n == nil {
+		logger.Printf("Notification daemon unavailable; tab notification dropped")
+		return
+	}
+	go func() {
+		a.notifMu.Lock()
+		replaces := a.notifMap[webID]
+		a.notifMu.Unlock()
+
+		deskID, err := n.Notify(title, body, replaces)
+		if err != nil {
+			logger.Printf("Failed to send tab notification: %v", err)
+			return
+		}
+		a.notifMu.Lock()
+		a.notifMap[webID] = deskID
+		a.notifRev[deskID] = webID
+		a.notifMu.Unlock()
+
+		n.OnClosed(deskID, func() {
+			a.notifMu.Lock()
+			if wID, ok := a.notifRev[deskID]; ok {
+				delete(a.notifRev, deskID)
+				delete(a.notifMap, wID)
+			}
+			a.notifMu.Unlock()
+			closeWebNotification(webID)
+		})
+	}()
+}
+
+// refreshNotificationOrigins keeps WebKit's pre-allowed notification origins in
+// sync with the tabs. WebKitGTK 2.52 needs the origins of every page a tab may
+// load pre-allowed via WebKitWebContext::initialize-notification-permissions,
+// otherwise requestPermission() silently resolves to "denied" and the tab's Web
+// Notifications never surface (see tabs_shell.go).
+func (a *App) refreshNotificationOrigins() {
+	if a.tabManager == nil {
+		return
+	}
+	seen := map[string]bool{}
+	add := func(raw string) {
+		if o := originOfURL(raw); o != "" && !seen[o] {
+			seen[o] = true
+		}
+	}
+	// Every stored/custom tab URL...
+	for _, t := range a.tabManager.List() {
+		add(a.resolveTabURL(t.URL))
+	}
+	// ...plus every configured service entrypoint (covers the first launch,
+	// before the tabs have been seeded into tabs.json).
+	if a.cfg != nil {
+		for _, svc := range a.cfg.Services {
+			add(svc.BaseURL)
+			add(svc.BackofficeURL)
+			add(svc.FrontendURL)
+			if svc.AdminPath != "" {
+				add(strings.TrimRight(svc.BaseURL, "/") + svc.AdminPath)
+			}
+		}
+	}
+	origins := make([]string, 0, len(seen))
+	for o := range seen {
+		origins = append(origins, o)
+	}
+	shellSetNotificationOrigins(origins)
+}
+
+// originOfURL returns the scheme://host[:port] origin of an absolute http(s)
+// URL, or "" when the URL is not absolute or not http(s).
+func originOfURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || !u.IsAbs() {
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	if u.Hostname() == "" {
+		return ""
+	}
+	o := u.Scheme + "://" + u.Hostname()
+	if p := u.Port(); p != "" {
+		o += ":" + p
+	}
+	return o
 }
 
 // refreshTrayTabs syncs the tab list shown in the tray context menu with the
@@ -626,6 +742,10 @@ func main() {
 
 	app := NewApp()
 	activeApp = app
+
+	// Pre-allow the notification origins before the first web process launches
+	// (WebKitGTK 2.52 reads the map at process start).
+	app.refreshNotificationOrigins()
 
 	if err := enablePersistentCookies(); err != nil {
 		log.Printf("Warning: failed to enable persistent webview cookies: %v", err)

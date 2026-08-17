@@ -45,6 +45,10 @@ extern void exportShellTitle(int id, const char *title);
 extern void exportShellUri(int id, const char *uri);
 extern void exportSettingsMessage(const char *msg);
 extern void exportNotesMessage(const char *msg);
+extern void exportShellNotification(guint64 id, const char *title, const char *body);
+
+// Forward declaration (defined in the notification-permissions section below).
+static void shell_notif_permissions_install(void);
 
 // Recursively find a widget by its GTK name (Wails names the container of the
 // main webview "webview-box").
@@ -128,6 +132,60 @@ static void shell_setup(void)
 	gtk_style_context_add_provider_for_screen(
 		gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
 		GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+
+	shell_notif_permissions_install();
+}
+
+// --- tab notification permissions --------------------------------------------
+//
+// WebKitGTK 2.52 does NOT surface notification permission requests through the
+// WebView "permission-request" signal: for a page whose origin is not in the
+// web context's initial permission map, requestPermission() silently resolves
+// to "denied" and show-notification never fires. To let tab pages display Web
+// Notifications we pre-allow the origins of the configured tabs via
+// WebKitWebContext::initialize-notification-permissions (the documented hook:
+// it fires whenever a new web process is about to launch, which is when the
+// initial permission map is read).
+
+static char *g_notif_origins[64];
+static int g_notif_origins_n = 0;
+
+// Called from Go whenever the tab set changes (copies the strings; read by the
+// permission handler on the GTK main thread).
+void shell_notif_set_origins(char **origins, int n)
+{
+	if (n > 64)
+		n = 64;
+	for (int i = 0; i < g_notif_origins_n; i++)
+		g_free(g_notif_origins[i]);
+	for (int i = 0; i < n; i++)
+		g_notif_origins[i] = g_strdup(origins[i]);
+	g_notif_origins_n = n;
+}
+
+static void shell_notif_init_permissions(WebKitWebContext *ctx, gpointer d)
+{
+	GList *allowed = NULL;
+	for (int i = 0; i < g_notif_origins_n; i++) {
+		WebKitSecurityOrigin *o =
+			webkit_security_origin_new_for_uri(g_notif_origins[i]);
+		if (o)
+			allowed = g_list_append(allowed, o);
+	}
+	// The origins live for the process lifetime; do NOT unref them here
+	// (unref'ing the GList crashes: the object is owned by the context).
+	webkit_web_context_initialize_notification_permissions(ctx, allowed, NULL);
+}
+
+static void shell_notif_permissions_install(void)
+{
+	static int installed = 0;
+	if (installed)
+		return;
+	installed = 1;
+	g_signal_connect(webkit_web_context_get_default(),
+		"initialize-notification-permissions",
+		G_CALLBACK(shell_notif_init_permissions), NULL);
 }
 
 static WebKitWebView *shell_find_tab(int id)
@@ -159,6 +217,102 @@ static void shell_uri_cb(GObject *o, GParamSpec *p, gpointer d)
 	exportShellUri(id, u ? u : "");
 }
 
+// --- tab notifications -> desktop -------------------------------------------
+//
+// Tab pages are real webviews, so they can use the Web Notifications API
+// (new Notification(...)). WebKitGTK 2.52 is NOT built with libnotify on this
+// stack, so the default show-notification handler would silently do nothing;
+// we take over the pipeline here:
+//
+//  1. "permission-request": notification permission requests are allowed
+//     (everything else stays denied).
+//  2. "show-notification": the WebKitNotification (id/title/body) is forwarded
+//     to Go, which displays it through D-Bus org.freedesktop.Notifications.
+//  3. When the desktop notification is dismissed, Go calls
+//     shell_notification_close(id) so the page's onclose fires.
+
+static gboolean shell_notif_permission(WebKitWebView *wv, WebKitPermissionRequest *req, gpointer d)
+{
+	if (WEBKIT_IS_NOTIFICATION_PERMISSION_REQUEST(req))
+		webkit_permission_request_allow(req);
+	else
+		webkit_permission_request_deny(req);
+	return TRUE;
+}
+
+#define SHELL_NOTIF_MAX 32
+
+typedef struct {
+	guint64 id;                // WebKit notification id
+	WebKitNotification *n;     // ref'ed so it survives until dismissed
+} shell_notif_entry;
+
+static shell_notif_entry g_shell_notifs[SHELL_NOTIF_MAX];
+static int g_shell_notifs_n = 0;
+
+static void shell_notif_add(guint64 id, WebKitNotification *n)
+{
+	if (g_shell_notifs_n >= SHELL_NOTIF_MAX) {
+		// Bound the registry: evict the oldest by closing it (the page may no
+		// longer be interested, and its onclose still fires).
+		webkit_notification_close(g_shell_notifs[0].n);
+		g_object_unref(g_shell_notifs[0].n);
+		memmove(&g_shell_notifs[0], &g_shell_notifs[1],
+			(size_t)(g_shell_notifs_n - 1) * sizeof(shell_notif_entry));
+		g_shell_notifs_n--;
+	}
+	g_object_ref(n);
+	g_shell_notifs[g_shell_notifs_n++] = (shell_notif_entry){id, n};
+}
+
+static void shell_notif_remove_idx(int i)
+{
+	g_object_unref(g_shell_notifs[i].n);
+	memmove(&g_shell_notifs[i], &g_shell_notifs[i + 1],
+		(size_t)(g_shell_notifs_n - i - 1) * sizeof(shell_notif_entry));
+	g_shell_notifs_n--;
+}
+
+static void shell_notif_close_id(guint64 id)
+{
+	for (int i = 0; i < g_shell_notifs_n; i++) {
+		if (g_shell_notifs[i].id == id) {
+			webkit_notification_close(g_shell_notifs[i].n);
+			shell_notif_remove_idx(i);
+			return;
+		}
+	}
+}
+
+static gboolean shell_notif_shown(WebKitWebView *wv, WebKitNotification *n, gpointer d)
+{
+	guint64 id = webkit_notification_get_id(n);
+	shell_notif_add(id, n);
+	exportShellNotification(id, webkit_notification_get_title(n),
+		webkit_notification_get_body(n));
+	// We handled the notification (Go shows it); keep the default libnotify
+	// handler (a no-op without libnotify) from also running.
+	g_signal_stop_emission_by_name(G_OBJECT(wv), "show-notification");
+	return TRUE;
+}
+
+static gboolean shell_notif_close_idle(gpointer d)
+{
+	guint64 *idp = (guint64 *)d;
+	shell_notif_close_id(*idp);
+	g_free(idp);
+	return G_SOURCE_REMOVE;
+}
+
+// Called from Go (any goroutine) when the desktop notification was dismissed;
+// runs the webkit_notification_close on the GTK main thread.
+void shell_notif_close_impl(guint64 id)
+{
+	guint64 *idp = g_new(guint64, 1);
+	*idp = id;
+	g_idle_add(shell_notif_close_idle, idp);
+}
+
 // Create (lazily) the webview of a tab and show it in the stack.
 static void shell_show_tab(int id, const char *url, double zoom)
 {
@@ -172,6 +326,8 @@ static void shell_show_tab(int id, const char *url, double zoom)
 		webkit_settings_set_enable_developer_extras(set, TRUE);
 		g_signal_connect(G_OBJECT(wv), "notify::title", G_CALLBACK(shell_title_cb), GINT_TO_POINTER(id));
 		g_signal_connect(G_OBJECT(wv), "notify::uri", G_CALLBACK(shell_uri_cb), GINT_TO_POINTER(id));
+		g_signal_connect(G_OBJECT(wv), "permission-request", G_CALLBACK(shell_notif_permission), NULL);
+		g_signal_connect(G_OBJECT(wv), "show-notification", G_CALLBACK(shell_notif_shown), NULL);
 		gtk_widget_show(GTK_WIDGET(wv));
 		char name[32];
 		snprintf(name, sizeof name, "tab-%d", id);
@@ -1098,6 +1254,27 @@ func shellOpenNotes(tabID int) {
 
 func shellCloseNotes() {
 	C.shell_request(C.int(10), 0, nil, 0, 0, nil, 0, 0)
+}
+
+// shellSetNotificationOrigins stores the origins that tab pages are allowed to
+// display Web Notifications from (see the initialize-notification-permissions
+// handler above). WebKitGTK 2.52 needs these pre-allowed or requestPermission()
+// silently resolves to "denied" and show-notification never fires.
+func shellSetNotificationOrigins(origins []string) {
+	if len(origins) == 0 {
+		C.shell_notif_set_origins(nil, 0)
+		return
+	}
+	cOrigins := make([]*C.char, len(origins))
+	for i, o := range origins {
+		cOrigins[i] = C.CString(o)
+	}
+	defer func() {
+		for _, p := range cOrigins {
+			C.free(unsafe.Pointer(p))
+		}
+	}()
+	C.shell_notif_set_origins(&cOrigins[0], C.int(len(cOrigins)))
 }
 
 // shellSetup schedules the widget repackage to run at the start of the GTK

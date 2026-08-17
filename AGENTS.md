@@ -8,7 +8,9 @@ A Go/Wails v2 desktop dashboard for monitoring three services:
 The app **works**: builds, runs, renders the UI, loads tabs from Go, and each tab is a
 **native WebKitWebView** (not an iframe). Chrome (header + tab bar) is a thin fixed
 strip; content lives in a `GtkStack` of per-tab webviews. Tray/frameless/theme/cookies
-work. This file documents the REAL project structure (verified by inspection), not a plan.
+work. Tab **Web Notifications** are lifted to the desktop via D-Bus
+(org.freedesktop.Notifications). This file documents the REAL project structure
+(verified by inspection), not a plan.
 
 ## Project Structure
 ```
@@ -20,6 +22,7 @@ work. This file documents the REAL project structure (verified by inspection), n
 │                          #   ShellSetChromeHeight/OpenSettings/OpenNotes/TabsChanged + resolveTabURL
 ├── settings_bridge.go     # Bridge Go for the settings WINDOW (dispatch on App + __dashReply)
 ├── notes_bridge.go        # Bridge Go for the per-tab NOTES WINDOW (own webview + __dashReply)
+├── notifications_bridge.go# cgo: closes a tab's WebKit notification on the GTK thread when its desktop notification is dismissed
 ├── inspector.go           # cgo: WebKitGTK page inspector per single tab webview (dock bottom/right/left/float)
 ├── persistent_cookies.go  # cgo: WebKitGTK cookie manager → SQLite persistent storage (webkit2_41)
 ├── wails.json             # Wails v2 config (embed dir: frontend/dist)
@@ -59,6 +62,7 @@ work. This file documents the REAL project structure (verified by inspection), n
     ├── config/config.go   # Config struct, Load/Default/Save, env-var auth overrides
     ├── cookie/store.go    # Persistent cookie jar (data/cookies.json)
     ├── models/dashboard.go# Internal model types (services, dashboards, proxy)
+    ├── notify/notify.go   # D-Bus org.freedesktop.Notifications client (desktop notifications): Notify/Replace + NotificationClosed
     ├── services/
     │   ├── clients.go     # HTTPClient + NeuroNet/Minecraft/SlotBuilder clients + auth (env)
     │   ├── manager.go     # ServiceManager: CheckAllHealth + per-service dashboards
@@ -71,11 +75,13 @@ work. This file documents the REAL project structure (verified by inspection), n
 
 ### main.go — the single source of app wiring
 The `App` struct holds everything: `cfg`, `manager`, `proxy`, `dashboardAPI`, `tabAPI`,
-`tabManager`, `cookieStore`, `cookieAPI`, `tray`. `NewApp()` wires them in order.
-`main()` sets `GDK_BACKEND=x11` for KDE Wayland (X11/XWayland required for frameless),
-enables persistent cookies, calls `shellSetup()` (re-groups the window into the
-chrome strip + tab stack, see tabs_shell.go) BEFORE `wails.Run()`, then creates the
-app and calls `runApp(app)` → `wails.Run(opts)` with:
+`tabManager`, `cookieStore`, `cookieAPI`, `tray`, `notifier` (D-Bus notifications),
+`notifMap`/`notifRev` (webkit-notification-id ↔ desktop-notification-id maps).
+`NewApp()` wires them in order. `main()` sets `GDK_BACKEND=x11` for KDE Wayland
+(X11/XWayland required for frameless), enables persistent cookies, calls
+`shellSetup()` (re-groups the window into the chrome strip + tab stack, see
+tabs_shell.go) and `refreshNotificationOrigins()` (pre-allow tab/service origins
+for Web Notifications, BEFORE the first web process launches) THEN `wails.Run()`.
 - `Frameless: true`, `SingleInstanceLock` (`it.alfio.Dashboard`), `OpenInspectorOnStartup: false`
   (the WebKit inspector is opened on demand from the header dropdown / Ctrl+Shift+F12 once
   the binary is built with the `devtools` tag, see inspector.go)
@@ -103,6 +109,8 @@ holds one **own WebKitWebView per tab**:
 - Tab **title/URI** are forwarded to the chrome via `//export exportShellTitle/
   exportShellUri` (tabs_shell_export.go) → wails events `shell:title` / `shell:uri`
   (`{tabId, title|uri}`) on `shellCtx` → `tabBar.setPageTitle` in app.js.
+- Tab **Web Notifications** are forwarded to the desktop via D-Bus (see the
+  "Tab notifications → desktop" section below).
 - All Wails-bound Go methods go through `shell_request(...)` → `g_idle_add` →
   `shell_req_cb`, so every GTK/WebKit call happens on the GTK main thread. Ops:
   `0=setup, 1=show, 2=destroy, 3=reorder, 4=zoom, 5=chrome height, 6=open settings,
@@ -114,6 +122,53 @@ holds one **own WebKitWebView per tab**:
 - The native tab shell replaced the old iframe/panel implementation: each tab is now
   a real browsing context (real cookies/localStorage/HSTS via the shared default
   web context, no CORS limits, inspector per tab).
+
+### Tab notifications → desktop (Web Notifications API, WebKitGTK 2.52)
+Tab pages are real webviews, so they can use the Web Notifications API
+(`new Notification(...)`). WebKitGTK 2.52 on this stack is NOT built with libnotify,
+so the default `show-notification` handler would silently do nothing. The dashboard
+takes over the whole pipeline:
+
+1. **Permission — the KEY gotcha**: WebKitGTK 2.52 does NOT emit the webview
+   `permission-request` signal for notification permissions. For any origin NOT in
+   the web context's initial permission map, `Notification.requestPermission()`
+   silently resolves to `"denied"` and `show-notification` NEVER fires — even with a
+   `permission-request` handler connected. The ONLY working mechanism is
+   pre-allowing origins via `WebKitWebContext::initialize-notification-permissions`:
+   - `tabs_shell.go` hooks the signal `initialize-notification-permissions` on the
+     default web context (`shell_notif_permissions_install`, called from `shell_setup`)
+     and calls `webkit_web_context_initialize_notification_permissions(ctx, allowed,
+     NULL)` with the stored origins (`shell_notif_set_origins`, set from Go).
+   - **Do NOT `g_object_unref` the `WebKitSecurityOrigin` list afterwards — the
+     objects are owned by the context and unref'ing crashes.** Leak them (they are
+     static per-process).
+   - The origin list is kept in sync by `App.refreshNotificationOrigins()`: the
+     resolved URL of every stored tab + every configured service entrypoint
+     (base_url, backoffice_url, frontend_url, base_url+admin_path). Called in `main()`
+     BEFORE `wails.Run()` (the map is read when the FIRST web process launches) and
+     again in `TabsChanged` so custom tabs added later are covered.
+   - Pre-allowed origins make `new Notification()` fire `show-notification` even
+     though the JS-side `requestPermission()` may STILL resolve to `"denied"` (a
+     WebKitGTK 2.52 quirk — pages that gate on `Notification.permission ===
+     'granted'` can still be surprised, but `new Notification()` displays anyway).
+2. **`permission-request` handler** (`shell_notif_permission`) allows
+   `WebKitNotificationPermissionRequest` and denies everything else (media/geo etc.).
+3. **`show-notification`** (`shell_notif_shown`) — registers the notification in a
+   bounded registry (`shell_notif_add`, max 32, evicts oldest by closing it), then
+   `//export exportShellNotification(id, title, body)` (tabs_shell_export.go) →
+   `App.showTabNotification` (main.go):
+   - logs it, then on a Go goroutine calls `internal/notify`'s `Notifier.Notify`
+     (`org.freedesktop.Notifications` via godbus on the session bus).
+   - `notifMap`/`notifRev` maps webkit-id ↔ desktop-id so a tab REPLACING a previous
+     notification (`replacesID`) updates the same desktop bubble.
+   - When the desktop notification is dismissed, `Notifier.OnClosed` → `closeWebNotification`
+     (notifications_bridge.go) → `shell_notif_close_impl` → `webkit_notification_close`
+     on the GTK main thread (via `g_idle_add`) so the page's `onclose` fires.
+   - `g_signal_stop_emission_by_name(wv, "show-notification")` suppresses the default
+     libnotify handler.
+   - `WebKitNotification` objects are `g_object_ref`'d so they survive until dismissed.
+   `App.Startup` creates the `Notifier` (logs `Desktop notification support enabled`
+   or drops tab notifications when the daemon is unavailable); `App.Shutdown` closes it.
 
 ### shell_app.go — Wails-bound shell controller
 Every `App` method below also has a `...NoContext` twin (frontend calls those):
@@ -130,10 +185,13 @@ Every `App` method below also has a `...NoContext` twin (frontend calls those):
   for a tab (same architecture as the settings window: own webview + ucm + bridge,
   load `wails://wails/notes.html?tab=<id>`; NOT modal), so the chrome strip is never
   resized and the tab pages never shift while editing notes
-- `TabsChanged()` — emits `tabs:changed` (for the settings/notes window / chrome to reload tabs)
+- `TabsChanged()` — emits `tabs:changed` (for the settings/notes window / chrome to
+  reload tabs) and re-syncs both the tray menu and the notification origins
 - `resolveTabURL(tab)` — builds the real admin URL for builtin tabs
   (service key → `backoffice_url > base_url+admin_path > base_url`, legacy fallbacks)
 - `tabZoomOf(tab)` — reads `settings["zoom"]` (0.5–2.5, default 1)
+- `refreshNotificationOrigins()` — rebuilds the pre-allowed Web Notification origins
+  (see "Tab notifications → desktop")
 
 ### Wails method binding pattern (IMPORTANT)
 Every frontend-callable method exists in TWO forms on `App`:
@@ -462,7 +520,7 @@ export SLOTBUILDER_TOKEN=xxx
    the bindings generation (goroutine dump shows `sync.Once.doSlow`). Use `dir`
    directly. Symptom: `wails build` hangs forever at "Generating bindings" with the
    `/tmp/wailsbindings` process stuck in `futex_do_wait`.
-6. **WebView cookie persistence**: WebKitGTK's default cookie manager is IN-MEMORY
+7. **WebView cookie persistence**: WebKitGTK's default cookie manager is IN-MEMORY
    (localStorage/HSTS persist via WebsiteDataManager, but cookies are lost on exit).
    Two mechanisms are in place:
    - `persistent_cookies.go`: `webkit_cookie_manager_set_persistent_storage` to
@@ -486,9 +544,9 @@ export SLOTBUILDER_TOKEN=xxx
      WebKit (server still receives the cookie — httponly only blocks JS access).
    The app-level cookie jar (`<exedir>/data/cookies.json`) is separate and
    used by the proxy/health statuses.
-7. **`ServiceManager` data**: live calls hit real endpoints; if a service is down,
+8. **`ServiceManager` data**: live calls hit real endpoints; if a service is down,
    header pills go offline (no panels any more).
-8. **DOM popups need strip expansion**: the chrome strip is ~104px, so any DOM popup
+9. **DOM popups need strip expansion**: the chrome strip is ~104px, so any DOM popup
    (tab context menu, inspector dropdown) is clipped. app.js expands
    the strip to ∃480px (`expandStrip` — `EXPANDED_STRIP`) while the popup is open and
    collapses it on close (`stripExpanded` guard; `syncChromeHeight` is skipped while
@@ -497,17 +555,46 @@ export SLOTBUILDER_TOKEN=xxx
    of view entirely. NOTE: the notes editor is NOT a DOM popup any more — it lives
    in its own floating window (see "Notes window" below), so the strip is never
    expanded for it and the tab pages never shift.
-9. **JS debug → Go log**: `window.runtime.LogPrint`/`LogDebug` do NOT reach
-   `dashboard.log`. To debug DOM from JS, use `fmt.Printf`/`log.Printf` in a Go method
-   (e.g. temporarily add a `DebugLog` bound method to App), regenerate bindings, and
-   call it — `log.SetOutput(f)` sends it to the log file.
-10. **A second webview cannot use Wails IPC** — Wails delivers Go→JS replies only to
+10. **JS debug → Go log**: `window.runtime.LogPrint`/`LogDebug` do NOT reach
+    `dashboard.log`. To debug DOM from JS, use `fmt.Printf`/`log.Printf` in a Go method
+    (e.g. temporarily add a `DebugLog` bound method to App), regenerate bindings, and
+    call it — `log.SetOutput(f)` sends it to the log file.
+11. **A second webview cannot use Wails IPC** — Wails delivers Go→JS replies only to
     the MAIN webview (`Frontend.ExecJS` → `webkit_web_view_run_javascript(w.webview)`).
     A secondary WebKitWebView sharing the chrome's user content manager will hang on
     `await window.go.main.App.CreateApp()` (blank window). Any extra window MUST use its
     own webview + ucm and a custom `script-message-received` bridge (see the settings
     window). Also `webkit_web_view_run_javascript` is deprecated on 2.40+ — use
     `webkit_web_view_evaluate_javascript`.
+12. **Web Notifications permission in WebKitGTK 2.52** — `permission-request` is NEVER
+    emitted for notification permissions; unlisted origins resolve `requestPermission()`
+    to `"denied"` and `show-notification` never fires. Pre-allow origins via
+    `WebKitWebContext::initialize-notification-permissions` (see the "Tab notifications
+    → desktop" section). Even pre-allowed origins may STILL report `"denied"` to JS —
+    but `new Notification()` then displays fine. Do NOT `g_object_unref` the
+    `WebKitSecurityOrigin` GList passed to `webkit_web_context_initialize_notification_permissions`
+    (crash); leak the origins (static per-process). Also: the webview `permission-request`
+    handler is still worth keeping (allows `WebKitNotificationPermissionRequest`, denies
+    the rest) — it covers other permission types and future WebKit versions.
+13. **cgo: `//export` files have per-file preamble rules** — Go code in file X can only
+    call `C.foo` if `foo` is in X's OWN preamble (declarations) or is a `//export`; the
+    amalgamated preamble is NOT used for type resolution. Symptoms: `could not determine
+    what C.foo refers to` for symbols that ARE defined in another file's preamble (e.g.
+    `C.free` without `#include <stdlib.h>` in THAT file). And a preamble declaration that
+    mismatches a definition in another preamble (e.g. `char**` vs `const char**`) fails the
+    whole amalgamated compile — all files then report unresolved C refs. Keep C functions
+    called from Go in the SAME file that defines them (see `shellSetNotificationOrigins`
+    living in tabs_shell.go, not tabs_shell_export.go), and `static` C helpers used before
+    their definition need a forward declaration.
+14. **Flaky Wails/WebKit startup crash (SIGABRT in `SetupWebview`)** — intermittent
+    "signal arrived during cgo execution" abort during `wails.Run`/`NewWindow`, BEFORE any
+    app code runs; not caused by app changes (a crash dump lands on stderr, and the app
+    log stops right after "WebKit cookie storage"). Just relaunch; rapid kill+restart
+    cycles make it more likely. It is unrelated to the notification code.
+15. **C debug prints** — temporary `g_printerr(...)` in the C shim lands on stderr
+    (captured when launching with `>log 2>&1`), bypassing the Go `dashboard.log`
+    entirely — the fastest way to see which WebKit signals actually fire. Remove them
+    before committing.
 
 ## Debugging Commands
 ```bash
@@ -536,6 +623,21 @@ ls -la build/bin/data/webview build/bin/data/cache
 ls -la build/bin/data/cookies.sqlite
 # WebView session-cookie snapshot (snapshots/restores login session cookies)
 cat build/bin/data/webview_cookies.json
+
+# --- Debugging the tab-notification pipeline ---------------------------------
+# 1) Serve a test page that calls `new Notification(...)` on a local origin:
+#    python3 -m http.server 8123   (a page with document.title staging helps:
+#    set document.title = "HAS_NOTIFICATION_API" / "PERM="+p / "NOTIFY_SHOWN"
+#    at each step — the shell forwards title changes as shell:title events).
+# 2) Add a temporary tab in the Settings window pointing at the test origin,
+#    then watch the Go log for `Tab notification: id=...` (main.go).
+# 3) Watch the actual D-Bus call go out on the session bus:
+#    dbus-monitor --session "interface='org.freedesktop.Notifications',type='method_call'"
+#    → the `Notify` member shows summary/body/app_name.
+# 4) To see which WebKit signals fire, add temporary g_printerr(...) to the C
+#    handlers (permission-request / show-notification) — stderr, see gotcha 15.
+# 5) Removing build/bin/data/webview resets per-origin WebKit decisions
+#    (notification permission included) for a clean slate.
 ```
 
 ## Build & Run Flow (reliable order)

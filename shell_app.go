@@ -146,6 +146,7 @@ func (a *App) CloseSettingsNoContext() {
 func (a *App) TabsChanged(ctx context.Context) {
 	logger.Printf("TabsChanged")
 	a.refreshTrayTabs()
+	a.refreshNotificationOrigins()
 	wailsRuntime.EventsEmit(a.ctx, "tabs:changed")
 }
 
