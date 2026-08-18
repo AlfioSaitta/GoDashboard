@@ -60,13 +60,6 @@ func (m *menu) revision() uint32 {
 	return m.rev
 }
 
-func (m *menu) bumpRevision() uint32 {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.rev++
-	return m.rev
-}
-
 // --- helper accessors ---
 
 func (m *menu) entries() []menuEntry {
@@ -241,7 +234,7 @@ func (m *menu) Set(iface, prop string, value dbus.Variant) *dbus.Error {
 func (m *menu) menuProps() map[string]dbus.Variant {
 	items := []groupEntry{}
 	for _, e := range m.entries() {
-		items = append(items, groupEntry{ID: e.ID, Props: e.Props})
+		items = append(items, groupEntry(e))
 	}
 	return map[string]dbus.Variant{
 		"Version":         dbus.MakeVariant(int32(0)),

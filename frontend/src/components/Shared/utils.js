@@ -37,34 +37,6 @@ export function icon(name, size = 16) {
   return icons[name] || icons.alert
 }
 
-export function formatTime(date) {
-  return new Date(date).toLocaleTimeString('it-IT', { hour: '2-digit', minute: '2-digit' })
-}
-
-export function formatDate(date) {
-  return new Date(date).toLocaleDateString('it-IT', { day: '2-digit', month: '2-digit', year: 'numeric' })
-}
-
-export function formatNumber(num) {
-  if (num >= 1000000) return (num / 1000000).toFixed(1) + 'M'
-  if (num >= 1000) return (num / 1000).toFixed(1) + 'K'
-  return num.toString()
-}
-
-// safeToFixed formats a numeric value with the given decimals, returning a
-// fallback ('-') when the value is missing or not a finite number.
-export function safeToFixed(value, decimals = 2, fallback = '-') {
-  const n = Number(value)
-  return Number.isFinite(n) ? n.toFixed(decimals) : fallback
-}
-
-// safePercent formats a ratio (e.g. 0.7321) as a percentage, guarding against
-// missing/invalid values.
-export function safePercent(value, decimals = 2, fallback = '-') {
-  const n = Number(value)
-  return Number.isFinite(n) ? (n * 100).toFixed(decimals) + '%' : fallback
-}
-
 // escapeHtml safely encodes a string for use inside template HTML.
 export function escapeHtml(value) {
   return String(value ?? '')
@@ -73,20 +45,4 @@ export function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;')
-}
-
-export function statusBadge(status, healthy = true) {
-  const colors = {
-    online: 'status-online',
-    offline: 'status-offline',
-    training: 'status-training',
-    deploying: 'status-deploying',
-    healthy: 'status-healthy',
-    unhealthy: 'status-unhealthy',
-    running: 'status-running',
-    stopped: 'status-stopped',
-    error: 'status-error',
-  }
-  const cls = colors[status] || (healthy ? 'status-healthy' : 'status-unhealthy')
-  return `<span class="status-badge ${cls}">${status}</span>`
 }

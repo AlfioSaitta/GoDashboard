@@ -11,20 +11,12 @@ export const api = {
     return runtime.WindowToggleMaximise()
   },
 
-  async windowUnmaximise() {
-    return runtime.WindowUnmaximise()
-  },
-
   async windowIsMaximised() {
     return runtime.WindowIsMaximised()
   },
 
   async windowQuit() {
     return runtime.Quit()
-  },
-
-  async getDashboard() {
-    return wails.GetDashboardNoContext()
   },
 
   async getSystemTheme() {
@@ -35,28 +27,8 @@ export const api = {
     return wails.GetThemeNoContext()
   },
 
-  async setTheme(theme) {
-    return wails.SetThemeNoContext(theme)
-  },
-
   async getServicesStatus() {
     return wails.GetServicesStatusNoContext()
-  },
-
-  async getNeuroNetData() {
-    return wails.GetNeuroNetDataNoContext()
-  },
-
-  async getMinecraftData() {
-    return wails.GetMinecraftDataNoContext()
-  },
-
-  async getSlotBuilderData() {
-    return wails.GetSlotBuilderDataNoContext()
-  },
-
-  async proxyRequest(req) {
-    return wails.ProxyRequest(req)
   },
 
   async getTabs() {
@@ -68,10 +40,6 @@ export const api = {
     return wails.AddTabNoContext(config)
   },
 
-  async removeTab(tabId) {
-    return wails.RemoveTabNoContext(String(tabId))
-  },
-
   async updateTab(tabId, config) {
     // config: { id, label, icon, url, enabled }
     return wails.UpdateTabNoContext(String(tabId), config)
@@ -80,14 +48,6 @@ export const api = {
   async updateTabSettings(tabId, settings) {
     // settings: { zoom, ... } — per-tab display options
     return wails.UpdateTabSettingsNoContext(String(tabId), settings || {})
-  },
-
-  async getNotes(tabId) {
-    return wails.GetNotesNoContext(String(tabId))
-  },
-
-  async saveNotes(tabId, notes) {
-    return wails.SaveNotesNoContext(String(tabId), notes || '')
   },
 
   // ── Native tab shell ──────────────────────────────────
@@ -115,17 +75,9 @@ export const api = {
     return wails.OpenSettingsNoContext()
   },
 
-  async closeSettings() {
-    return wails.CloseSettingsNoContext()
-  },
-
   // Dedicated notes editor window (floating, non-modal — main window stays usable).
   async openNotes(tabId) {
     return wails.OpenNotesNoContext(Number(tabId))
-  },
-
-  async closeNotes() {
-    return wails.CloseNotesNoContext()
   },
 
   // Per-tab SSH terminal (native VTE in the tab box).
@@ -173,29 +125,5 @@ export const api = {
 
   async openExternal(url) {
     return wails.OpenExternalNoContext(url)
-  },
-
-  async listCookies(domain = '') {
-    return wails.ListCookiesNoContext(domain)
-  },
-
-  async setCookie(cookie) {
-    return wails.SetCookieNoContext(cookie)
-  },
-
-  async deleteCookie(domain, path, name) {
-    return wails.DeleteCookieNoContext(domain, path, name)
-  },
-
-  async clearCookies(domain = '') {
-    return wails.ClearCookiesNoContext(domain)
-  },
-
-  async neuronetInference(modelId, input) {
-    return wails.NeuroNetInference(modelId, input)
-  },
-
-  async minecraftConsoleCommand(serverId, command) {
-    return wails.MinecraftConsoleCommand(serverId, command)
   },
 }

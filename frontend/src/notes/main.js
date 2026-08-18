@@ -154,8 +154,15 @@ async function mount() {
     clearTimeout(saveTimer)
     flush()
   })
-  app.querySelector('#notes-close').addEventListener('click', () => {
+  app.querySelector('#notes-close').addEventListener('click', async () => {
     clearTimeout(saveTimer)
+    saveTimer = null
+    if (dirty) {
+      dirty = false
+      try {
+        await notesApi.saveNotes(tabId, textarea.value)
+      } catch { /* best effort: window closes anyway */ }
+    }
     notesApi.closeNotes().catch(() => {})
   })
 

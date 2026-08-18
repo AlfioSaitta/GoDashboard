@@ -306,17 +306,6 @@ export class TabBar {
     if (label && !item.classList.contains('renaming')) label.textContent = String(title)
   }
 
-  // Refreshes the note-indicator state in place (called after a note save)
-  // without re-rendering the whole bar.
-  refreshNotes() {
-    this.container.querySelectorAll('.tab-note-btn').forEach(btn => {
-      const tab = this.tabs.find(t => String(t.id) === String(btn.dataset.tabId))
-      const hasNotes = !!(tab && tab.notes && String(tab.notes).trim())
-      btn.classList.toggle('has-note', hasNotes)
-      btn.title = hasNotes ? 'Note presenti — modifica' : 'Aggiungi una nota'
-    })
-  }
-
   setDefaultTabId(tabId) {
     this.container.dataset.defaultTabId = String(tabId)
   }

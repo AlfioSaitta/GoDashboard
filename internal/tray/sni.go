@@ -16,10 +16,10 @@ import (
 )
 
 const (
-	sniObj   = "/StatusNotifierItem"
-	menuObj  = "/MenuBar"
-	sniIface = "org.kde.StatusNotifierItem"
-	menuIface = "com.canonical.dbusmenu"
+	sniObj     = "/StatusNotifierItem"
+	menuObj    = "/MenuBar"
+	sniIface   = "org.kde.StatusNotifierItem"
+	menuIface  = "com.canonical.dbusmenu"
 	propsIface = "org.freedesktop.DBus.Properties"
 )
 
@@ -97,8 +97,10 @@ func New(h *Handler) (*SNI, error) {
 	}
 
 	// Let a running StatusNotifierWatcher know about us (best effort).
-	go func() { _ = conn.Object("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher").
-		Call("org.kde.StatusNotifierWatcher.RegisterStatusNotifierItem", 0, s.busName).Err }()
+	go func() {
+		_ = conn.Object("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher").
+			Call("org.kde.StatusNotifierWatcher.RegisterStatusNotifierItem", 0, s.busName).Err
+	}()
 
 	_ = conn.Emit(menuObj, menuIface+".LayoutUpdated", uint32(0))
 	return s, nil
@@ -133,7 +135,7 @@ func (s *SNI) SetTabs(items []TabItem) {
 	}
 	ti := make([]tabItem, 0, len(items))
 	for _, it := range items {
-		ti = append(ti, tabItem{ID: it.ID, Name: it.Name})
+		ti = append(ti, tabItem(it))
 	}
 	menu.SetTabs(ti)
 	if conn != nil {
@@ -181,20 +183,20 @@ func (s *SNI) Set(iface, prop string, value dbus.Variant) *dbus.Error {
 
 func (s *SNI) props() map[string]dbus.Variant {
 	return map[string]dbus.Variant{
-		"Id":                 dbus.MakeVariant("dashboard"),
-		"Category":           dbus.MakeVariant("ApplicationStatus"),
-		"Title":              dbus.MakeVariant("Dashboard"),
-		"Status":             dbus.MakeVariant("Active"),
-		"WindowId":           dbus.MakeVariant(uint32(0)),
-		"IconName":           dbus.MakeVariant("dashboard"),
-		"OverlayIconName":    dbus.MakeVariant(""),
-		"AttentionIconName":  dbus.MakeVariant(""),
-		"IconPixmap":         dbus.MakeVariant([]iconPixmap{}),
-		"OverlayIconPixmap":  dbus.MakeVariant([]iconPixmap{}),
+		"Id":                  dbus.MakeVariant("dashboard"),
+		"Category":            dbus.MakeVariant("ApplicationStatus"),
+		"Title":               dbus.MakeVariant("Dashboard"),
+		"Status":              dbus.MakeVariant("Active"),
+		"WindowId":            dbus.MakeVariant(uint32(0)),
+		"IconName":            dbus.MakeVariant("dashboard"),
+		"OverlayIconName":     dbus.MakeVariant(""),
+		"AttentionIconName":   dbus.MakeVariant(""),
+		"IconPixmap":          dbus.MakeVariant([]iconPixmap{}),
+		"OverlayIconPixmap":   dbus.MakeVariant([]iconPixmap{}),
 		"AttentionIconPixmap": dbus.MakeVariant([]iconPixmap{}),
-		"ToolTipTitle":       dbus.MakeVariant("Dashboard"),
-		"ToolTipBody":        dbus.MakeVariant("Multi-service dashboard"),
-		"Menu":               dbus.MakeVariant(dbus.ObjectPath(menuObj)),
-		"ItemIsMenu":         dbus.MakeVariant(false),
+		"ToolTipTitle":        dbus.MakeVariant("Dashboard"),
+		"ToolTipBody":         dbus.MakeVariant("Multi-service dashboard"),
+		"Menu":                dbus.MakeVariant(dbus.ObjectPath(menuObj)),
+		"ItemIsMenu":          dbus.MakeVariant(false),
 	}
 }

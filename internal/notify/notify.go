@@ -57,14 +57,14 @@ func (n *Notifier) Notify(summary, body string, replacesID uint32) (uint32, erro
 	obj := n.conn.Object(busName, objPath)
 	var id uint32
 	err := obj.Call(notifyCall, 0,
-		"Dashboard",            // app name
-		replacesID,             // replaces_id
-		"dashboard",            // app icon (themed, see build/install-desktop.sh)
-		summary,                // summary
-		body,                   // body
-		[]string{},             // actions (none)
+		"Dashboard",               // app name
+		replacesID,                // replaces_id
+		"dashboard",               // app icon (themed, see build/install-desktop.sh)
+		summary,                   // summary
+		body,                      // body
+		[]string{},                // actions (none)
 		map[string]dbus.Variant{}, // hints (none)
-		int32(-1),              // expire_timeout: server default
+		int32(-1),                 // expire_timeout: server default
 	).Store(&id)
 	if err != nil {
 		return 0, fmt.Errorf("notify: %w", err)

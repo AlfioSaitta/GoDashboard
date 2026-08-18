@@ -28,21 +28,18 @@ type NotesBridgeMessage struct {
 // handleNotesMessage is called on the GTK main thread by exportNotesMessage.
 // It dispatches the requested method on App and answers via window.__dashReply.
 func handleNotesMessage(raw string) {
-	// The first outgoing message happens right after the page finished
-	// loading — arm the C-side fit probe then (GTK main thread).
-	var head map[string]interface{}
-	if err := json.Unmarshal([]byte(raw), &head); err == nil {
-		if m, _ := head["method"].(string); m == "getNotes" {
-			C.shell_notes_fit_start()
-		}
+	var req NotesBridgeMessage
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		logger.Printf("notes bridge: bad message: %v", err)
+		notesReplyJSON(req.ID, false, nil, "messaggio non valido")
+		return
+	}
+	// The first outgoing message is "getTab" (right after the page finished
+	// loading) — arm the C-side fit probe then (GTK main thread).
+	if req.Method == "getTab" {
+		C.shell_notes_fit_start()
 	}
 	go func() {
-		var req NotesBridgeMessage
-		if err := json.Unmarshal([]byte(raw), &req); err != nil {
-			logger.Printf("notes bridge: bad message: %v", err)
-			notesReplyJSON(req.ID, false, nil, "messaggio non valido")
-			return
-		}
 		app := activeApp
 		if app == nil {
 			notesReplyJSON(req.ID, false, nil, "app non inizializzata")
@@ -79,16 +76,6 @@ func dispatchNotes(a *App, method string, args []interface{}) (interface{}, erro
 			"icon":  t.Icon,
 			"notes": t.Notes,
 		}, nil
-
-	case "getNotes":
-		if len(args) < 1 {
-			return nil, fmt.Errorf("argomenti mancanti")
-		}
-		id, err := asInt(args[0])
-		if err != nil {
-			return nil, err
-		}
-		return a.tabAPI.GetNotes(ctx, fmt.Sprintf("%d", id))
 
 	case "saveNotes":
 		if len(args) < 2 {

@@ -403,21 +403,14 @@ func scheduleWebviewCookieSnapshots(uris []string, interval int) error {
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
 
-	arr := C.malloc(C.size_t((len(uris) + 1)) * C.size_t(unsafe.Sizeof(uintptr(0))))
-	if arr == nil {
-		return os.ErrInvalid
-	}
-	defer C.free(arr)
-
-	us := unsafe.Slice((*uintptr)(arr), len(uris)+1)
+	cstrs := make([]*C.char, len(uris)+1)
 	for i, u := range uris {
-		us[i] = uintptr(unsafe.Pointer(C.CString(u)))
+		cstrs[i] = C.CString(u)
 	}
-	us[len(uris)] = 0
 
-	C.schedule_periodic_snapshots(cpath, (**C.char)(arr), C.int(len(uris)), C.int(interval))
+	C.schedule_periodic_snapshots(cpath, (**C.char)(unsafe.Pointer(&cstrs[0])), C.int(len(uris)), C.int(interval))
 	for i := 0; i < len(uris); i++ {
-		C.free(unsafe.Pointer(us[i]))
+		C.free(unsafe.Pointer(cstrs[i]))
 	}
 	logger.Printf("WebKit cookie snapshots scheduled for %d URIs (every %ds)", len(uris), interval)
 	return nil
@@ -434,18 +427,12 @@ func snapshotAllWebviewCookies(uris []string) {
 	}
 	cpath := C.CString(path)
 	defer C.free(unsafe.Pointer(cpath))
-	arr := C.malloc(C.size_t((len(uris) + 1)) * C.size_t(unsafe.Sizeof(uintptr(0))))
-	if arr == nil {
-		return
-	}
-	defer C.free(arr)
-	us := unsafe.Slice((*uintptr)(arr), len(uris)+1)
+	cstrs := make([]*C.char, len(uris)+1)
 	for i, u := range uris {
-		us[i] = uintptr(unsafe.Pointer(C.CString(u)))
+		cstrs[i] = C.CString(u)
 	}
-	us[len(uris)] = 0
-	C.snapshot_all_sync(cpath, (**C.char)(arr), C.int(len(uris)))
+	C.snapshot_all_sync(cpath, (**C.char)(unsafe.Pointer(&cstrs[0])), C.int(len(uris)))
 	for i := 0; i < len(uris); i++ {
-		C.free(unsafe.Pointer(us[i]))
+		C.free(unsafe.Pointer(cstrs[i]))
 	}
 }

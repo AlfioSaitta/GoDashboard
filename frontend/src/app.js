@@ -1,9 +1,8 @@
 import { TabBar } from '@/components/TabBar/TabBar.js'
-import { SettingsModal } from '@/components/SettingsModal/SettingsModal.js'
 import { dashboardStore } from '@/stores/dashboard.js'
 import { api } from '@/services/api.js'
 import { icon } from '@/components/Shared/utils.js'
-import { urlForTab } from '@/components/Shared/services.js'
+import { tabZoom, urlForTab } from '@/components/Shared/services.js'
 import * as runtime from '../wailsjs/runtime/runtime.js'
 
 const ZOOM_MIN = 0.5
@@ -12,11 +11,6 @@ const ZOOM_STEP = 0.1
 
 function clampZoom(z) {
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, Math.round(z * 10) / 10))
-}
-
-function zoomOf(tab) {
-  const z = tab && tab.settings ? Number(tab.settings.zoom) : NaN
-  return Number.isFinite(z) ? clampZoom(z) : 1
 }
 
 // ── Theme ────────────────────────────────────────────────
@@ -45,88 +39,7 @@ async function applyTheme() {
 }
 
 export async function createApp() {
-  const settingsView = window.location.hash === '#settings'
-  if (settingsView) {
-    await mountSettingsView()
-    return
-  }
   await mountChrome()
-}
-
-// ── Impostazioni: rendered as the WHOLE content of the native settings
-// window (the app bundle is loaded with "#settings").
-async function mountSettingsView() {
-  try {
-    await applyTheme()
-  } catch { /* keep default */ }
-
-  const app = document.getElementById('app')
-  app.innerHTML = '<div id="settings-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="settings-title"></div>'
-  document.body.classList.add('settings-mode')
-
-  const refreshList = async () => {
-    try {
-      settingsModal.open(await api.getTabs())
-    } catch { /* keep list */ }
-  }
-
-  const settingsModal = new SettingsModal(document.getElementById('settings-modal'), {
-    onSave: async (config) => {
-      await api.saveTabConfig(config)
-      api.tabsChanged().catch(() => {})
-      await refreshList()
-    },
-    onUpdateTab: async (tabId, config) => {
-      await api.updateTab(tabId, config)
-      api.tabsChanged().catch(() => {})
-      await refreshList()
-    },
-    onRemoveTab: async (tabId) => {
-      await api.removeTab(tabId)
-      api.tabsChanged().catch(() => {})
-      await refreshList()
-    },
-    onReorder: async (ids) => {
-      try {
-        await api.reorderTabs(ids)
-        api.tabsChanged().catch(() => {})
-      } catch (error) {
-        console.error('Failed to reorder tabs:', error)
-      }
-    },
-    onThemeChange: async (theme) => {
-      try {
-        await api.setTheme(theme)
-        await applyThemePref(theme)
-      } catch (error) {
-        console.error('Failed to save theme:', error)
-      }
-    },
-    onUpdateSettings: async (tabId, settings) => {
-      try {
-        if (settings && typeof settings.zoom === 'number') {
-          api.shellZoom(tabId, settings.zoom).catch(() => {})
-        }
-        await api.updateTabSettings(tabId, settings)
-      } catch (error) {
-        console.error('Failed to save tab settings:', error)
-      }
-    },
-    onNotesChange: async (tabId, notes) => {
-      try {
-        await api.saveNotes(tabId, notes)
-      } catch (error) {
-        console.error('Failed to save notes:', error)
-      }
-    },
-    onClose: async () => {
-      try { await api.closeSettings() } catch { /* noop */ }
-    },
-  })
-
-  const tabs = await api.getTabs()
-  settingsModal.setTheme(currentThemePref)
-  settingsModal.open(tabs || [])
 }
 
 // ── Chrome strip: header + tab bar only. Each tab is a native webview
@@ -294,7 +207,7 @@ async function mountChrome() {
         console.error('Failed to duplicate tab:', error)
       }
     },
-    onZoom: (tab, delta) => setTabZoom(tab, zoomOf(tab) + delta),
+    onZoom: (tab, delta) => setTabZoom(tab, tabZoom(tab) + delta),
     onResetZoom: (tab) => setTabZoom(tab, 1),
     onNotes: (tab) => openNotes(tab),
     onTerminal: (tab) => {
@@ -502,7 +415,12 @@ async function mountChrome() {
     syncMaximiseState()
   })
   document.getElementById('win-close').addEventListener('click', () => api.windowQuit().catch(() => {}))
-  winMaxBtn.addEventListener('dblclick', syncMaximiseState)
+  winMaxBtn.addEventListener('dblclick', async () => {
+    try {
+      await api.windowToggleMaximise()
+    } catch { /* noop */ }
+    syncMaximiseState()
+  })
   syncMaximiseState()
 
   loadServiceStatus()
@@ -529,8 +447,8 @@ async function mountChrome() {
       const activeTab = tabs[activeIdx]
       if (!activeTab) return
       e.preventDefault()
-      if (e.key === '=' || e.key === '+') setTabZoom(activeTab, zoomOf(activeTab) + ZOOM_STEP)
-      else if (e.key === '-' || e.key === '_') setTabZoom(activeTab, zoomOf(activeTab) - ZOOM_STEP)
+      if (e.key === '=' || e.key === '+') setTabZoom(activeTab, tabZoom(activeTab) + ZOOM_STEP)
+      else if (e.key === '-' || e.key === '_') setTabZoom(activeTab, tabZoom(activeTab) - ZOOM_STEP)
       else setTabZoom(activeTab, 1)
     }
   })

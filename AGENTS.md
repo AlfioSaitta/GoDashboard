@@ -61,16 +61,14 @@ work. Tab **Web Notifications** are lifted to the desktop via D-Bus
 │   └── package.json
 └── internal/
     ├── api/
-    │   ├── dashboard.go   # DashboardAPI (health/dashboards), TabAPI (tabs), API response types
-    │   └── cookies.go     # CookieAPI (list/set/delete/clear per domain) → cookie.Store
+    │   └── dashboard.go   # DashboardAPI (service health + statuses), TabAPI (tabs), API response types
+    ├── atomicwrite/       # Safe atomic file writes (used by config/tab persistence)
     ├── config/config.go   # Config struct, Load/Default/Save, env-var auth overrides
-    ├── cookie/store.go    # Persistent cookie jar (data/cookies.json)
-    ├── models/dashboard.go# Internal model types (services, dashboards, proxy)
+    ├── models/dashboard.go# Internal model types (services, health statuses)
     ├── notify/notify.go   # D-Bus org.freedesktop.Notifications client (desktop notifications): Notify/Replace + NotificationClosed
     ├── services/
     │   ├── clients.go     # HTTPClient + Alpha/Beta/Gamma clients + auth (env)
-    │   ├── manager.go     # ServiceManager: CheckAllHealth + per-service dashboards
-    │   └── proxy.go       # ProxyService: ReverseProxy handler, ProxyRequest, cookie inject/capture
+    │   └── manager.go     # ServiceManager: CheckAllHealth + per-service statuses
     ├── tab/manager.go     # TabManager: persistent tabs (data/tabs.json)
     └── tray/              # D-Bus StatusNotifierItem tray (sni.go, menu.go) via godbus
 ```
@@ -78,8 +76,8 @@ work. Tab **Web Notifications** are lifted to the desktop via D-Bus
 ## Backend Architecture
 
 ### main.go — the single source of app wiring
-The `App` struct holds everything: `cfg`, `manager`, `proxy`, `dashboardAPI`, `tabAPI`,
-`tabManager`, `cookieStore`, `cookieAPI`, `tray`, `notifier` (D-Bus notifications),
+The `App` struct holds everything: `cfg`, `manager`, `dashboardAPI`, `tabAPI`,
+`tabManager`, `tray`, `notifier` (D-Bus notifications),
 `notifMap`/`notifRev` (webkit-notification-id ↔ desktop-notification-id maps).
 `NewApp()` wires them in order. `main()` sets `GDK_BACKEND=x11` for KDE Wayland
 (X11/XWayland required for frameless), enables persistent cookies, calls
@@ -252,7 +250,7 @@ Wails-bound service configuration editor used by the Settings window:
 - `GetAppConfig()` — returns the whole config as a generic map (services, proxy, ui)
 - `SaveAppConfig(patch)` — merges the patch into `config.yaml`: edits/validates
   service url/auth/terminal fields (`app_config.go`), then reconfigures the live
-  `ServiceManager` and `ProxyService` at runtime (`Reconfigure` keeps the cookie jar)
+  `ServiceManager` at runtime (`Reconfigure` keeps the health/status clients)
 - Helpers `serviceConfigMap`/`asMapSafe`/`asStringSafe`/... serialize the config
   into the JSON-shaped maps the frontend expects.
 
@@ -262,12 +260,10 @@ Every frontend-callable method exists in TWO forms on `App`:
 - `MethodNoContext(args...)` — wrapper calling the ctx version with `context.Background()`
 
 The frontend's `api.js` calls the `...NoContext` variants via the generated
-`wailsjs/go/main/App.js` exports. HTTP handlers live in `internal` (proxy), NOT in
-`main.go`. Startup registers a `/api/proxy/{service}/{path...}` reverse proxy on `:8080`
-only when `cfg.Proxy.Enabled`.
+`wailsjs/go/main/App.js` exports.
 
 ### internal/api/dashboard.go
-`DashboardAPI` (service health + per-service dashboards, delegating to ServiceManager)
+`DashboardAPI` (service health + statuses, delegating to ServiceManager)
 and `TabAPI` (tab CRUD):
 - `TabAPI.ListTabs` — if tabs.json is empty, seeds the 3 defaults (alpha/beta/gamma)
 - `TabAPI.UpdateTab(id, config)` — updates label/url/icon from a `map[string]interface{}`
@@ -275,7 +271,7 @@ and `TabAPI` (tab CRUD):
 - `TabAPI.GetNotes(id)` / `TabAPI.SaveNotes(id, notes)` — per-tab persistent notes
   (field `Notes` on the tab, `data/tabs.json`; `Tab`/`TabInfo` expose `notes`)
 - `TabAPI.ReorderTabs(ids []int)` — reorders by id list (added for drag&drop)
-- API response types (`TabInfo`, `ServiceStatus`, sub-dashboards, proxy types) all here.
+- API response types (`TabInfo`, `ServiceStatus`) all here.
   `TabInfo.Settings` carries the per-tab display settings (`{zoom: float}`).
 - NOTE: `AddTab`/`RemoveTab` are NOT on TabAPI; they're methods directly on `App`
   (in main.go) operating on `a.tabManager`.
@@ -293,33 +289,12 @@ thin Wails methods that turn on the extension via the native tab shell (see tabs
   `float` = detached, freely movable.
 The main dashboard webview + every tab webview enable developer extras at creation.
 
-### internal/cookie/store.go + api/cookies.go
-Persistent per-domain cookie jar backed by `<exedir>/data/cookies.json` (portable).
-- `Store` is goroutine-safe; `Set` replaces on (domain,path,name);
-  `List(domain)`/`Delete`/`Clear` support suffix-domain matching;
-  `HeaderValue(host,path)` builds a Cookie header honouring path/expiry.
-- `CookieAPI` exposes Wails methods: `ListCookies`, `SetCookie`, `DeleteCookie`,
-  `ClearCookies` (all + NoContext). Cookie fields: domain, path, name, value,
-  secure, http_only, expires (RFC3339), created.
-
-### internal/services/proxy.go
-Real CORS-bypass reverse proxy, NOT a stub. Uses Go 1.22+ PathValue routing
-(`/api/proxy/{service}/{path...}`). Per allowed-host it builds an `httputil.ReverseProxy`
-with a `customTransport` that strips Origin/Referer, plus:
-- `injectCookies(req, host)` — adds stored jar cookies before forwarding (customTransport)
-- `captureCookies(resp, host)` — persists `Set-Cookie` from upstream back into the jar
-  (wired in `modifyResponse` and after `ProxyRequest`)
-- `ProxyRequest(ctx, models.ProxyRequest)` — Wails-exposed JSON proxy with header map,
-  basic/bearer auth from env, cookie inject/capture.
-CORS: `Access-Control-Allow-Origin: *`, strips X-Frame-Options/CSP so proxies/iframes work.
-NOTE: since tabs became native webviews the proxy is no longer required for the tab content.
-
 ### internal/services/{clients,manager}.go
 `HTTPClient` wraps an `http.Client`; `addAuth` applies config `Auth.Type`:
 - `basic` → username/password from env vars (BETA_USER/PASS)
 - `bearer` → token from env (GAMMA_TOKEN)
 `ServiceManager` owns one client per configured service; `CheckAllHealth` probes each
-(5s timeout) and `GetXxxDashboard` gathers lists (used by the health/status pills).
+(5s timeout) and returns the per-service statuses (used by the header status pills).
 
 ### internal/tab/manager.go
 `TabManager` persists `[]Tab{ID,Title,URL,Icon,Notes}` to `data/tabs.json`
@@ -552,9 +527,9 @@ and `data/cache` so WebKitGTK website data stays portable too.
 ```yaml
 app: {name: Dashboard, version: 1.0.0, debug: true}
 services:               # per-service: base_url, backoffice_url, api_prefix,
-  alpha: {...}         #   auth: {type: none|basic|bearer, *_env}, endpoints, proxy_enabled
+  alpha: {...}         #   auth: {type: none|basic|bearer, *_env}, endpoints
 beta/gamma: ...
-proxy: {enabled, allowed_hosts, timeout_seconds, max_body_size_mb}
+proxy: {enabled, allowed_hosts, timeout_seconds, max_body_size_mb}  # legacy, still saved but inert
 ui: {theme: dark, default_tab: alpha, webview_gpu_policy: always, tabs: [{id,label,icon,enabled}]}
 ```
 ### Auth env vars (never commit real values)
@@ -602,13 +577,13 @@ export GAMMA_TOKEN=xxx
          which re-adds those cookies via `webkit_cookie_manager_add_cookie`
          (`soup_cookie_new(...,-1)` = session).
        * `App.Shutdown` runs `snapshotAllWebviewCookies()` to catch last-minute
-         changes.
+changes.
      KNOWN LIMITATION: the `httponly` flag is dropped on the add→get roundtrip by
      WebKit (server still receives the cookie — httponly only blocks JS access).
-   The app-level cookie jar (`<exedir>/data/cookies.json`) is separate and
-   used by the proxy/health statuses.
-8. **`ServiceManager` data**: live calls hit real endpoints; if a service is down,
-   header pills go offline (no panels any more).
+   (The legacy app-level cookie jar plus proxy/statuses were REMOVED — all tab
+   cookies live in the WebKit cookie manager above.)
+ 8. **`ServiceManager` data**: live calls hit real endpoints; if a service is down,
+    header pills go offline (no panels any more).
 9. **DOM popups need strip expansion**: the chrome strip is ~104px, so any DOM popup
    (tab context menu, inspector dropdown) is clipped. app.js expands
    the strip to ~480px (`expandStrip` — `EXPANDED_STRIP`) while the popup is open and

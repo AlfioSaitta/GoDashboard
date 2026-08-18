@@ -210,7 +210,6 @@ func (a *App) SaveAppConfig(patch map[string]interface{}) error {
 
 	// Re-apply runtime components so a settings change takes effect live.
 	a.manager.Reconfigure(a.cfg)
-	a.proxy.Reconfigure(a.cfg)
 	a.refreshNotificationOrigins()
 	a.TabsChanged(context.Background())
 

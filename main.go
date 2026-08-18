@@ -8,7 +8,6 @@ import (
 	"io"
 	"io/fs"
 	"log"
-	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
@@ -28,7 +27,6 @@ import (
 
 	"dashboard/internal/api"
 	"dashboard/internal/config"
-	"dashboard/internal/cookie"
 	"dashboard/internal/notify"
 	"dashboard/internal/paths"
 	"dashboard/internal/services"
@@ -82,22 +80,19 @@ func closeLogging() {
 }
 
 type App struct {
-	ctx        context.Context
-	cfg        *config.Config
-	manager    *services.ServiceManager
-	proxy      *services.ProxyService
-	dashboardAPI *api.DashboardAPI
-	tabAPI      *api.TabAPI
-	tabManager  *tab.TabManager
-	cookieStore *cookie.Store
-	cookieAPI   *api.CookieAPI
-	tray        *tray.SNI
-	visMu       sync.RWMutex
+	ctx           context.Context
+	cfg           *config.Config
+	manager       *services.ServiceManager
+	dashboardAPI  *api.DashboardAPI
+	tabAPI        *api.TabAPI
+	tabManager    *tab.TabManager
+	tray          *tray.SNI
+	visMu         sync.RWMutex
 	windowVisible bool
-	notifier    *notify.Notifier
-	notifMu     sync.Mutex
-	notifMap    map[uint64]uint32 // webkit notification id -> desktop notification id
-	notifRev    map[uint32]uint64 // desktop notification id -> webkit notification id
+	notifier      *notify.Notifier
+	notifMu       sync.Mutex
+	notifMap      map[uint64]uint32 // webkit notification id -> desktop notification id
+	notifRev      map[uint32]uint64 // desktop notification id -> webkit notification id
 }
 
 func NewApp() *App {
@@ -114,25 +109,17 @@ func NewApp() *App {
 	manager := services.NewServiceManager(cfg)
 	logger.Printf("Service manager initialized")
 
-	proxy := services.NewProxyService(cfg)
-	logger.Printf("Proxy service initialized")
-
-	dashboardAPI := api.NewDashboardAPI(manager, proxy)
+	dashboardAPI := api.NewDashboardAPI(manager)
 	tabManager := tab.NewTabManager()
 	tabAPI := api.NewTabAPI(tabManager)
-	cookieStore := cookie.New()
-	cookieAPI := api.NewCookieAPI(cookieStore)
 	logger.Printf("API handlers created")
 
 	return &App{
 		cfg:          cfg,
 		manager:      manager,
-		proxy:        proxy,
 		dashboardAPI: dashboardAPI,
 		tabAPI:       tabAPI,
 		tabManager:   tabManager,
-		cookieStore:  cookieStore,
-		cookieAPI:    cookieAPI,
 		notifMap:     map[uint64]uint32{},
 		notifRev:     map[uint32]uint64{},
 	}
@@ -149,17 +136,6 @@ func (a *App) Startup(ctx context.Context) {
 	// startup, so the first tab switch has no creation latency. Safe from any
 	// goroutine: dispatched onto the GTK main thread via the request channel.
 	a.precreateTabs()
-
-	if a.cfg.Proxy.Enabled {
-		logger.Printf("Registering proxy handler on /api/proxy/")
-		go func() {
-			http.Handle("/api/proxy/{service}/{path...}", a.proxy)
-			logger.Printf("Proxy HTTP server starting on :8080")
-			if err := http.ListenAndServe(":8080", nil); err != nil {
-				logger.Printf("Proxy server error: %v", err)
-			}
-		}()
-	}
 
 	a.setWindowVisible(true)
 
@@ -500,36 +476,8 @@ func detectSystemTheme() string {
 	return "dark"
 }
 
-func (a *App) GetDashboard(ctx context.Context) (*api.DashboardData, error) {
-	return a.dashboardAPI.GetDashboard(ctx)
-}
-
-func (a *App) GetServicesStatus(ctx context.Context) ([]api.ServiceStatus, error) {
+func (a *App) GetServicesStatus(ctx context.Context) []api.ServiceStatus {
 	return a.dashboardAPI.GetServicesStatus(ctx)
-}
-
-func (a *App) GetNeuroNetData(ctx context.Context) (*api.NeuroNetDashboard, error) {
-	return a.dashboardAPI.GetNeuroNetData(ctx)
-}
-
-func (a *App) GetMinecraftData(ctx context.Context) (*api.MinecraftDashboard, error) {
-	return a.dashboardAPI.GetMinecraftData(ctx)
-}
-
-func (a *App) GetSlotBuilderData(ctx context.Context) (*api.SlotBuilderDashboard, error) {
-	return a.dashboardAPI.GetSlotBuilderData(ctx)
-}
-
-func (a *App) ProxyRequest(ctx context.Context, req api.ProxyRequest) (*api.ProxyResponse, error) {
-	return a.dashboardAPI.ProxyRequest(ctx, req)
-}
-
-func (a *App) NeuroNetInference(ctx context.Context, modelID string, input map[string]interface{}) (map[string]interface{}, error) {
-	return a.dashboardAPI.NeuroNetInference(ctx, modelID, input)
-}
-
-func (a *App) MinecraftConsoleCommand(ctx context.Context, serverID, command string) error {
-	return a.dashboardAPI.MinecraftConsoleCommand(ctx, serverID, command)
 }
 
 func (a *App) ListTabs(ctx context.Context) ([]api.TabInfo, error) {
@@ -540,24 +488,8 @@ func (a *App) ListTabsNoContext() ([]api.TabInfo, error) {
 	return a.tabAPI.ListTabs(context.Background())
 }
 
-func (a *App) GetDashboardNoContext() (*api.DashboardData, error) {
-	return a.dashboardAPI.GetDashboard(context.Background())
-}
-
-func (a *App) GetServicesStatusNoContext() ([]api.ServiceStatus, error) {
+func (a *App) GetServicesStatusNoContext() []api.ServiceStatus {
 	return a.dashboardAPI.GetServicesStatus(context.Background())
-}
-
-func (a *App) GetNeuroNetDataNoContext() (*api.NeuroNetDashboard, error) {
-	return a.dashboardAPI.GetNeuroNetData(context.Background())
-}
-
-func (a *App) GetMinecraftDataNoContext() (*api.MinecraftDashboard, error) {
-	return a.dashboardAPI.GetMinecraftData(context.Background())
-}
-
-func (a *App) GetSlotBuilderDataNoContext() (*api.SlotBuilderDashboard, error) {
-	return a.dashboardAPI.GetSlotBuilderData(context.Background())
 }
 
 func (a *App) AddTabNoContext(config map[string]interface{}) api.Tab {
@@ -575,16 +507,6 @@ func (a *App) AddTabNoContext(config map[string]interface{}) api.Tab {
 	}
 	tab := a.tabManager.AddWithIcon(url, title, icon)
 	return api.Tab{ID: tab.ID, Title: tab.Title, URL: tab.URL, Icon: tab.Icon}
-}
-
-func (a *App) RemoveTabNoContext(id string) bool {
-	// Try parsing as integer ID first
-	intID, err := strconv.Atoi(id)
-	if err == nil {
-		return a.tabManager.Remove(intID)
-	}
-	// If not an integer, try removing by URL
-	return a.tabManager.RemoveByURL(id)
 }
 
 func (a *App) AddTab(ctx context.Context, config map[string]interface{}) api.Tab {
@@ -631,62 +553,12 @@ func (a *App) UpdateTabSettingsNoContext(id string, settings map[string]interfac
 	return a.tabAPI.UpdateTabSettings(context.Background(), id, settings)
 }
 
-// GetNotes returns the persistent notes of the given tab.
-func (a *App) GetNotes(ctx context.Context, id string) (string, error) {
-	return a.tabAPI.GetNotes(ctx, id)
-}
-
-func (a *App) GetNotesNoContext(id string) (string, error) {
-	return a.tabAPI.GetNotes(context.Background(), id)
-}
-
-// SaveNotes persists the notes of the given tab.
-func (a *App) SaveNotes(ctx context.Context, id string, notes string) (api.Tab, error) {
-	return a.tabAPI.SaveNotes(ctx, id, notes)
-}
-
-func (a *App) SaveNotesNoContext(id string, notes string) (api.Tab, error) {
-	return a.tabAPI.SaveNotes(context.Background(), id, notes)
-}
-
 func (a *App) ReorderTabs(ctx context.Context, ids []int) error {
 	return a.tabAPI.ReorderTabs(ctx, ids)
 }
 
 func (a *App) ReorderTabsNoContext(ids []int) error {
 	return a.tabAPI.ReorderTabs(context.Background(), ids)
-}
-
-func (a *App) ListCookies(ctx context.Context, domain string) []api.CookieInfo {
-	return a.cookieAPI.ListCookies(ctx, domain)
-}
-
-func (a *App) ListCookiesNoContext(domain string) []api.CookieInfo {
-	return a.cookieAPI.ListCookies(context.Background(), domain)
-}
-
-func (a *App) SetCookie(ctx context.Context, ck api.CookieInfo) api.CookieInfo {
-	return a.cookieAPI.SetCookie(ctx, ck)
-}
-
-func (a *App) SetCookieNoContext(ck api.CookieInfo) api.CookieInfo {
-	return a.cookieAPI.SetCookie(context.Background(), ck)
-}
-
-func (a *App) DeleteCookie(ctx context.Context, domain, path, name string) bool {
-	return a.cookieAPI.DeleteCookie(ctx, domain, path, name)
-}
-
-func (a *App) DeleteCookieNoContext(domain, path, name string) bool {
-	return a.cookieAPI.DeleteCookie(context.Background(), domain, path, name)
-}
-
-func (a *App) ClearCookies(ctx context.Context, domain string) int {
-	return a.cookieAPI.ClearCookies(ctx, domain)
-}
-
-func (a *App) ClearCookiesNoContext(domain string) int {
-	return a.cookieAPI.ClearCookies(context.Background(), domain)
 }
 
 // OpenExternal opens a URL in the system's default browser (used by the tab
@@ -843,16 +715,16 @@ func clearWebviewCacheIfStale() {
 
 func runApp(app *App) error {
 	opts := &options.App{
-		Title:  app.cfg.App.Name,
-		Width:  1400,
-		Height: 900,
-		MinWidth:  1024,
-		MinHeight: 768,
-		DisableResize: false,
-		Fullscreen: false,
-		Frameless: true,
-		StartHidden: false,
-		AlwaysOnTop: false,
+		Title:            app.cfg.App.Name,
+		Width:            1400,
+		Height:           900,
+		MinWidth:         1024,
+		MinHeight:        768,
+		DisableResize:    false,
+		Fullscreen:       false,
+		Frameless:        true,
+		StartHidden:      false,
+		AlwaysOnTop:      false,
 		BackgroundColour: &options.RGBA{R: 16, G: 20, B: 29, A: 255},
 		Linux: &linux.Options{
 			Icon:             appIcon,
@@ -866,7 +738,7 @@ func runApp(app *App) error {
 				app.ShowWindow()
 			},
 		},
-		OnStartup: app.Startup,
+		OnStartup:  app.Startup,
 		OnDomReady: app.OnDomReady,
 		OnShutdown: app.Shutdown,
 		Bind: []interface{}{

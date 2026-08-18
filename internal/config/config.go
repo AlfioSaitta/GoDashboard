@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"dashboard/internal/atomicwrite"
 	"dashboard/internal/paths"
 
 	"gopkg.in/yaml.v3"
@@ -36,7 +37,7 @@ type TerminalConfig struct {
 	Host        string `yaml:"host,omitempty"`
 	Port        int    `yaml:"port,omitempty"`
 	User        string `yaml:"user,omitempty"`
-	Auth        string `yaml:"auth,omitempty"`        // password | key | agent (default: agent)
+	Auth        string `yaml:"auth,omitempty"`         // password | key | agent (default: agent)
 	PasswordEnv string `yaml:"password_env,omitempty"` // env var name holding the SSH password
 	KeyPath     string `yaml:"key_path,omitempty"`     // path to the private key file
 	Dir         string `yaml:"dir,omitempty"`          // local working dir for the shell fallback
@@ -58,17 +59,17 @@ type ServiceConfig struct {
 }
 
 type ProxyConfig struct {
-	Enabled          bool     `yaml:"enabled"`
-	AllowedHosts     []string `yaml:"allowed_hosts"`
-	TimeoutSeconds   int      `yaml:"timeout_seconds"`
-	MaxBodySizeMB    int      `yaml:"max_body_size_mb"`
+	Enabled        bool     `yaml:"enabled"`
+	AllowedHosts   []string `yaml:"allowed_hosts"`
+	TimeoutSeconds int      `yaml:"timeout_seconds"`
+	MaxBodySizeMB  int      `yaml:"max_body_size_mb"`
 }
 
 type UIConfig struct {
-	Theme            string   `yaml:"theme"`
-	DefaultTab       string   `yaml:"default_tab"`
-	WebviewGpuPolicy string   `yaml:"webview_gpu_policy,omitempty"` // always|ondemand|never (Wails Linux)
-	Tabs             []UITab  `yaml:"tabs"`
+	Theme            string  `yaml:"theme"`
+	DefaultTab       string  `yaml:"default_tab"`
+	WebviewGpuPolicy string  `yaml:"webview_gpu_policy,omitempty"` // always|ondemand|never (Wails Linux)
+	Tabs             []UITab `yaml:"tabs"`
 }
 
 type UITab struct {
@@ -122,14 +123,14 @@ func DefaultConfig() *Config {
 		},
 		Services: map[string]ServiceConfig{
 			"neuronet": {
-				Name:          "NeuroNet",
-				BaseURL:       "http://localhost:8000",
-				AdminPath:     "/admin",
-				APIPrefix:     "/api",
-				Auth:          AuthConfig{Type: "none"},
-				Terminal:      TerminalConfig{Enabled: true, Host: "localhost", Port: 22, User: "root", Auth: "agent"},
+				Name:           "NeuroNet",
+				BaseURL:        "http://localhost:8000",
+				AdminPath:      "/admin",
+				APIPrefix:      "/api",
+				Auth:           AuthConfig{Type: "none"},
+				Terminal:       TerminalConfig{Enabled: true, Host: "localhost", Port: 22, User: "root", Auth: "agent"},
 				TimeoutSeconds: 30,
-				ProxyEnabled:  true,
+				ProxyEnabled:   true,
 				Endpoints: ServiceEndpoint{
 					Health:    "/health",
 					Models:    "/models",
@@ -138,13 +139,13 @@ func DefaultConfig() *Config {
 				},
 			},
 			"minecraft": {
-				Name:          "Minecraft Network",
-				BaseURL:       "http://51.75.77.248:9800",
-				APIPrefix:     "/api",
-				Auth:          AuthConfig{Type: "basic", UsernameEnv: "MINECRAFT_USER", PasswordEnv: "MINECRAFT_PASS"},
-				Terminal:      TerminalConfig{Enabled: true, Host: "51.75.77.248", Port: 22, User: "root", Auth: "agent"},
+				Name:           "Minecraft Network",
+				BaseURL:        "http://51.75.77.248:9800",
+				APIPrefix:      "/api",
+				Auth:           AuthConfig{Type: "basic", UsernameEnv: "MINECRAFT_USER", PasswordEnv: "MINECRAFT_PASS"},
+				Terminal:       TerminalConfig{Enabled: true, Host: "51.75.77.248", Port: 22, User: "root", Auth: "agent"},
 				TimeoutSeconds: 15,
-				ProxyEnabled:  true,
+				ProxyEnabled:   true,
 				Endpoints: ServiceEndpoint{
 					Status:  "/status",
 					Servers: "/servers",
@@ -176,8 +177,8 @@ func DefaultConfig() *Config {
 			MaxBodySizeMB:  50,
 		},
 		UI: UIConfig{
-			Theme: "system",
-			DefaultTab: "neuronet",
+			Theme:            "system",
+			DefaultTab:       "neuronet",
 			WebviewGpuPolicy: "always",
 			Tabs: []UITab{
 				{ID: "neuronet", Label: "NeuroNet", Icon: "brain", Enabled: true},
@@ -193,11 +194,7 @@ func (c *Config) Save(path string) error {
 	if err != nil {
 		return err
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, 0o644)
+	return atomicwrite.Write(path, data, 0o644)
 }
 
 func findConfigFile() string {

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 
+	"dashboard/internal/atomicwrite"
 	"dashboard/internal/paths"
 )
 
@@ -51,10 +52,8 @@ func (tm *TabManager) load() {
 }
 
 func (tm *TabManager) save() {
-	dir := filepath.Dir(tm.path)
-	_ = os.MkdirAll(dir, 0o755)
 	data, _ := json.Marshal(tm.tabs)
-	_ = os.WriteFile(tm.path, data, 0o644)
+	_ = atomicwrite.Write(tm.path, data, 0o644)
 }
 
 func (tm *TabManager) List() []Tab {

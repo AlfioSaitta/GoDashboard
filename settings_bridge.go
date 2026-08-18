@@ -32,21 +32,18 @@ type SettingsBridgeMessage struct {
 // handleSettingsMessage is called on the GTK main thread by exportSettingsMessage.
 // It dispatches the requested method on App and answers via window.__dashReply.
 func handleSettingsMessage(raw string) {
+	var req SettingsBridgeMessage
+	if err := json.Unmarshal([]byte(raw), &req); err != nil {
+		logger.Printf("settings bridge: bad message: %v", err)
+		settingsReplyJSON(req.ID, false, nil, "messaggio non valido")
+		return
+	}
 	// The first outgoing message ("getTabs") happens right after the page
 	// finished loading — arm the C-side fit probe then (GTK main thread).
-	var head map[string]interface{}
-	if err := json.Unmarshal([]byte(raw), &head); err == nil {
-		if m, _ := head["method"].(string); m == "getTabs" {
-			C.shell_settings_fit_start()
-		}
+	if req.Method == "getTabs" {
+		C.shell_settings_fit_start()
 	}
 	go func() {
-		var req SettingsBridgeMessage
-		if err := json.Unmarshal([]byte(raw), &req); err != nil {
-			logger.Printf("settings bridge: bad message: %v", err)
-			settingsReplyJSON(req.ID, false, nil, "messaggio non valido")
-			return
-		}
 		app := activeApp
 		if app == nil {
 			settingsReplyJSON(req.ID, false, nil, "app non inizializzata")
@@ -199,16 +196,6 @@ func dispatchSettings(a *App, method string, args []interface{}) (interface{}, e
 			return nil, err
 		}
 		return a.UpdateTabSettings(ctx, id, settings)
-
-	case "getNotes":
-		if len(args) < 1 {
-			return nil, fmt.Errorf("argomenti mancanti")
-		}
-		id, err := asString(args[0])
-		if err != nil {
-			return nil, err
-		}
-		return a.tabAPI.GetNotes(ctx, id)
 
 	case "saveNotes":
 		if len(args) < 2 {

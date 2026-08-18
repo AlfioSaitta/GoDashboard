@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"dashboard/internal/config"
-	"dashboard/internal/models"
 )
 
 type HTTPClient struct {
@@ -129,25 +128,6 @@ func (c *NeuroNetClient) Health(ctx context.Context) (map[string]interface{}, er
 	return result, err
 }
 
-func (c *NeuroNetClient) ListModels(ctx context.Context) ([]models.NeuroNetModel, error) {
-	var result []models.NeuroNetModel
-	err := c.Get(ctx, c.config.Endpoints.Models, &result)
-	return result, err
-}
-
-func (c *NeuroNetClient) ListTrainingJobs(ctx context.Context) ([]models.NeuroNetTrainingJob, error) {
-	var result []models.NeuroNetTrainingJob
-	err := c.Get(ctx, c.config.Endpoints.Training, &result)
-	return result, err
-}
-
-func (c *NeuroNetClient) Inference(ctx context.Context, modelID string, input map[string]interface{}) (map[string]interface{}, error) {
-	path := c.config.Endpoints.Inference + "/" + modelID
-	var result map[string]interface{}
-	err := c.Post(ctx, path, input, &result)
-	return result, err
-}
-
 type MinecraftClient struct {
 	*HTTPClient
 }
@@ -162,23 +142,6 @@ func (c *MinecraftClient) Status(ctx context.Context) (map[string]interface{}, e
 	return result, err
 }
 
-func (c *MinecraftClient) ListServers(ctx context.Context) ([]models.MinecraftServer, error) {
-	var result []models.MinecraftServer
-	err := c.Get(ctx, c.config.Endpoints.Servers, &result)
-	return result, err
-}
-
-func (c *MinecraftClient) ListPlayers(ctx context.Context) ([]models.MinecraftPlayer, error) {
-	var result []models.MinecraftPlayer
-	err := c.Get(ctx, c.config.Endpoints.Players, &result)
-	return result, err
-}
-
-func (c *MinecraftClient) SendConsoleCommand(ctx context.Context, serverID, command string) error {
-	path := c.config.Endpoints.Console + "/" + serverID
-	return c.Post(ctx, path, map[string]string{"command": command}, nil)
-}
-
 type SlotBuilderClient struct {
 	*HTTPClient
 }
@@ -187,32 +150,8 @@ func NewSlotBuilderClient(cfg config.ServiceConfig) *SlotBuilderClient {
 	return &SlotBuilderClient{HTTPClient: NewHTTPClient(cfg)}
 }
 
-func (c *SlotBuilderClient) ListGames(ctx context.Context) ([]models.SlotBuilderGame, error) {
-	var result []models.SlotBuilderGame
+func (c *SlotBuilderClient) ListGames(ctx context.Context) ([]map[string]interface{}, error) {
+	var result []map[string]interface{}
 	err := c.Get(ctx, c.config.Endpoints.Games, &result)
-	return result, err
-}
-
-func (c *SlotBuilderClient) GetAnalytics(ctx context.Context, gameID string, from, to time.Time) ([]models.SlotBuilderAnalytics, error) {
-	path := c.config.Endpoints.Analytics + "/" + gameID
-	params := url.Values{}
-	params.Set("from", from.Format(time.RFC3339))
-	params.Set("to", to.Format(time.RFC3339))
-	
-	var result []models.SlotBuilderAnalytics
-	err := c.Get(ctx, path+"?"+params.Encode(), &result)
-	return result, err
-}
-
-func (c *SlotBuilderClient) ListDeployments(ctx context.Context) ([]models.SlotBuilderDeployment, error) {
-	var result []models.SlotBuilderDeployment
-	err := c.Get(ctx, c.config.Endpoints.Deployments, &result)
-	return result, err
-}
-
-func (c *SlotBuilderClient) GetConfig(ctx context.Context, gameID string) (map[string]interface{}, error) {
-	path := c.config.Endpoints.Config + "/" + gameID
-	var result map[string]interface{}
-	err := c.Get(ctx, path, &result)
 	return result, err
 }
