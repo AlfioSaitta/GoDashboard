@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha1"
 	"embed"
 	"fmt"
+	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"net/url"
@@ -141,6 +144,11 @@ func (a *App) Startup(ctx context.Context) {
 	logger.Printf("App.Startup called")
 
 	a.scheduleCookieSnapshots()
+
+	// Eagerly pre-create the tab webviews (without loading URLs) a moment after
+	// startup, so the first tab switch has no creation latency. Safe from any
+	// goroutine: dispatched onto the GTK main thread via the request channel.
+	a.precreateTabs()
 
 	if a.cfg.Proxy.Enabled {
 		logger.Printf("Registering proxy handler on /api/proxy/")
@@ -758,9 +766,13 @@ func main() {
 	// WebKit discards nothing on rebuild: the settings page and its assets get
 	// cached under <exedir>/data/cache/Dashboard keyed by URL, so an older
 	// bundle can outlive a new binary (stale settings window, no auto-resize).
-	// The HTTP resource cache is per-run state (websites data lives in the data
-	// dir), so clearing this folder on every start keeps the UI always fresh.
-	clearWebviewResourceCache()
+	// BUT the cache also holds every tab-site resource (WebKitCache blobs), so
+	// wiping it on every start would force all tab pages to re-download their
+	// assets after every launch. We only invalidate it when the embedded
+	// frontend bundle actually changed (hash comparison against a marker in
+	// the data dir), so a rebuild still gets a fresh bundle while routine
+	// launches keep the tab-site disk cache intact.
+	clearWebviewCacheIfStale()
 
 	err := runApp(app)
 	if err != nil {
@@ -768,15 +780,64 @@ func main() {
 	}
 }
 
-// clearWebviewResourceCache removes WebKit's on-disk resource cache so a
-// rebuild can never leave a stale cached frontend bundle behind (see main()).
-func clearWebviewResourceCache() {
+// bundleHash computes a stable hash of the embedded frontend bundle (file
+// names + contents, walked in lexical order) so we can detect rebuilds.
+func bundleHash() (string, error) {
+	h := sha1.New()
+	err := fs.WalkDir(assets, "frontend/dist", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if _, err := io.WriteString(h, path); err != nil {
+			return err
+		}
+		f, err := assets.Open(path)
+		if err != nil {
+			return err
+		}
+		if _, err := io.Copy(h, f); err != nil {
+			f.Close()
+			return err
+		}
+		return f.Close()
+	})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// clearWebviewCacheIfStale removes WebKit's on-disk resource cache only when
+// the embedded frontend bundle hash differs from the marker stored in the data
+// dir (i.e. after a rebuild). Keeps the tab-site resource cache across normal
+// launches. See main().
+func clearWebviewCacheIfStale() {
 	appCache := filepath.Join(paths.WebviewCacheDir(), "Dashboard")
+	marker := paths.File(".dash-bundle-hash")
+
+	sum, err := bundleHash()
+	if err != nil {
+		logger.Printf("Warning: cannot hash frontend bundle: %v", err)
+		return
+	}
+
+	prev, rerr := os.ReadFile(marker)
+	if rerr == nil && string(prev) == sum {
+		return // bundle unchanged: keep the tab-site cache warm
+	}
+
+	logger.Printf("Frontend bundle changed (hash %s); clearing webview cache", sum)
 	if err := os.RemoveAll(appCache); err != nil {
 		logger.Printf("Warning: failed to clear webview cache: %v", err)
 	}
 	if err := os.MkdirAll(appCache, 0o755); err != nil {
 		logger.Printf("Warning: failed to recreate webview cache dir: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte(sum), 0o644); err != nil {
+		logger.Printf("Warning: failed to write bundle hash marker: %v", err)
 	}
 }
 

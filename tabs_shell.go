@@ -548,8 +548,62 @@ static void shell_show_tab(int id, const char *url, double zoom)
 	WebKitWebView *wv = shell_find_tab(id);
 	if (wv && zoom > 0.01)
 		webkit_web_view_set_zoom_level(wv, zoom);
+	// A pre-created tab (eager precreate, no URL loaded yet) gets its URL on
+	// first activation.
+	if (wv && url && url[0] && !webkit_web_view_get_uri(wv))
+		webkit_web_view_load_uri(wv, url);
 	if (wv)
 		gtk_widget_grab_focus(GTK_WIDGET(wv));
+}
+
+// ----- eager pre-creation of tab webviews -----
+// Creating a tab's webview (webkit_web_view_new + paned + GtkStack wiring) is
+// cheap but not free: doing it on FIRST activation adds latency to the first
+// tab switch. We pre-create the webviews for every stored tab a moment after
+// startup (once shell_setup has built the stack), WITHOUT loading any URL, so
+// activating a tab only issues its load_uri. The URL is loaded lazily by
+// shell_show_tab exactly as if the tab had been created on demand.
+static int *g_precreate_ids = NULL;
+static int g_precreate_n = 0;
+
+// Store the tab ids to pre-create (dispatched through the request channel so
+// this runs on the GTK main thread).
+void shell_set_precreate_ids(const int *ids, int n)
+{
+	if (g_precreate_ids)
+		g_free(g_precreate_ids);
+	g_precreate_ids = NULL;
+	g_precreate_n = n;
+	if (n > 0 && ids) {
+		g_precreate_ids = g_new(int, n);
+		memcpy(g_precreate_ids, ids, sizeof(int) * (size_t)n);
+	}
+}
+
+static gboolean shell_precreate_cb(gpointer data)
+{
+	if (!g_precreate_ids)
+		return G_SOURCE_REMOVE;
+	// The stack may not exist yet (shell_setup runs on the first idle
+	// iteration); retry until it does.
+	if (!shell_stack)
+		return G_SOURCE_CONTINUE;
+	for (int i = 0; i < g_precreate_n; i++) {
+		int id = g_precreate_ids[i];
+		if (id > 0 && !shell_find_tab_box(id))
+			shell_show_tab(id, NULL, 0.0);
+	}
+	g_free(g_precreate_ids);
+	g_precreate_ids = NULL;
+	g_precreate_n = 0;
+	return G_SOURCE_REMOVE;
+}
+
+// Arm the pre-create pass ~1.2s after startup. Runs on the GTK main thread
+// (registered from the request handler / idle).
+void shell_precreate_start(void)
+{
+	g_timeout_add(1200, shell_precreate_cb, NULL);
 }
 
 static void shell_destroy_tab(int id)
@@ -1364,7 +1418,8 @@ typedef struct {
 	               // 5 chrome height, 6 open settings, 7 close settings,
 	               // 8 inspector, 9 open notes, 10 close notes,
 	               // 11 terminal toggle, 12 terminal open/close,
-	               // 13 terminal destroy, 14 terminal restart, 15 terminal split
+	               // 13 terminal destroy, 14 terminal restart, 15 terminal split,
+	               // 16 precreate tab webviews
 	int id;
 	double zoom;
 	int height;
@@ -1418,6 +1473,10 @@ static gboolean shell_req_cb(gpointer data)
 	case 13: shell_terminal_destroy(req->id); break;
 	case 14: shell_terminal_restart(req->id); break;
 	case 15: shell_terminal_split(req->id, req->term_split); break;
+	case 16:
+		shell_set_precreate_ids(req->ids, req->n);
+		shell_precreate_start();
+		break;
 	}
 	if (req->url) g_free(req->url);
 	if (req->ids) g_free(req->ids);
@@ -1480,6 +1539,7 @@ void shell_term_set_askpass(const char *path)
 import "C"
 
 import (
+	"context"
 	"unsafe"
 )
 
@@ -1526,6 +1586,29 @@ func shellOpenNotes(tabID int) {
 
 func shellCloseNotes() {
 	C.shell_request(C.int(10), 0, nil, 0, 0, nil, 0, 0)
+}
+
+// precreateTabs eagerly creates the webviews of all stored tabs (without
+// loading their URLs) a moment after startup, so the first tab switch has no
+// creation latency. The ids are dispatched onto the GTK main thread via the
+// request channel (op 16); the C side waits for the stack to exist and then
+// creates each missing tab box. ListTabs is used so first-run defaults are
+// seeded before the ids are collected.
+func (a *App) precreateTabs() {
+	if a.tabAPI == nil {
+		return
+	}
+	tabs, err := a.tabAPI.ListTabs(context.Background())
+	if err != nil {
+		logger.Printf("Precreate skipped: %v", err)
+		return
+	}
+	ids := make([]int, 0, len(tabs))
+	for _, t := range tabs {
+		ids = append(ids, t.ID)
+	}
+	shellPostIDs(16, ids)
+	logger.Printf("Precreate armed for %d tabs", len(ids))
 }
 
 // shellSetNotificationOrigins stores the origins that tab pages are allowed to

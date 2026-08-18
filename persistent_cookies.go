@@ -47,6 +47,34 @@ static GMainLoop *snapshot_loop = NULL;
 static GList *snapshot_merged = NULL;   // accumulated SoupCookie* copies
 static SoupCookie **snapshot_cur_nodes = NULL; // alias array for dedup (freed)
 
+// Run a nested default-context loop with a watchdog so a callback that never
+// arrives (hung cookie manager / web process) cannot freeze the UI forever.
+// crash-safe: the timeout source is cancelled when the loop exits normally,
+// and quit-through-timeout marks the loop finished before the (unref'ed) loop
+// is gone.
+typedef struct {
+	GMainLoop *loop;
+	guint     *id;
+} loop_watch;
+
+static gboolean loop_quit_cb(gpointer data)
+{
+	loop_watch *w = data;
+	*w->id = 0; // timeout fired: do NOT g_source_remove it afterwards
+	g_main_loop_quit(w->loop);
+	return G_SOURCE_REMOVE;
+}
+
+static void run_loop_watchdog(GMainLoop *loop, int ms)
+{
+	guint id = 0;
+	loop_watch w = { loop, &id };
+	id = g_timeout_add(ms > 0 ? ms : 1000, loop_quit_cb, &w);
+	g_main_loop_run(loop);
+	if (id != 0)
+		g_source_remove(id);
+}
+
 // Dedup key compare on (domain, path, name).
 static gboolean cookie_key_equal(SoupCookie *a, SoupCookie *b) {
 	const char *da = soup_cookie_get_domain(a);
@@ -113,7 +141,11 @@ static int snapshot_uri_collect(const char *uri) {
 	GMainLoop *loop = g_main_loop_new(NULL, FALSE);
 	snapshot_loop = loop;
 	webkit_cookie_manager_get_cookies(cm, uri, NULL, snapshot_cb, NULL);
-	g_main_loop_run(loop);
+	// nested loop + watchdog: the cookie manager async callback may never
+	// arrive if the web process is stuck; bail out after ~3s instead of
+	// freezing the whole desktop until the timeout of the outer background
+	// loop gets to run again.
+	run_loop_watchdog(loop, 3000);
 	g_main_loop_unref(loop);
 	snapshot_loop = NULL;
 	// return count collected so far so callers can log progress
@@ -186,13 +218,40 @@ static int restore_snapshot_sync(const char *path) {
 		GMainLoop *loop = g_main_loop_new(NULL, FALSE);
 		restore_loop = loop;
 		webkit_cookie_manager_add_cookie(cm, c, NULL, addcookie_cb, NULL);
-		g_main_loop_run(loop);
+		// watchdog: if the async add never completes (hung web process) we
+		// still progress to the next cookie / finish instead of wedging the
+		// main thread forever.
+		run_loop_watchdog(loop, 3000);
 		g_main_loop_unref(loop);
 		restore_loop = NULL;
 		count++;
 		p = spos;
 	}
 	return count;
+}
+
+// ----- async restore on the GTK main thread -----
+// App.OnDomReady fires on Wails' message goroutine, NOT on the GTK main thread.
+// Running the cookie restore (creation of GMainLoops, nesting into the GTK
+// default context) from that goroutine is unsafe — the nested loop must run on
+// the GTK main thread. We dispatch the whole restore through an idle callback
+// so it executes on the main loop, like every other GTK/WebKit call, and
+// report the result through the //export below.
+extern void exportCookiesRestored(int count, char *path);
+
+static gboolean restore_snapshot_idle(gpointer data)
+{
+	char *path = data;
+	int n = restore_snapshot_sync(path);
+	exportCookiesRestored(n, path);
+	g_free(path);
+	return G_SOURCE_REMOVE;
+}
+
+// Schedule the restore (idle, GTK thread). `path` is copied.
+static void restore_snapshot_async(const char *path)
+{
+	g_idle_add(restore_snapshot_idle, g_strdup(path));
 }
 // ---------- periodical snapshot scheduling ----------
 static const char *g_snap_path = NULL;
@@ -288,18 +347,28 @@ func enablePersistentCookies() error {
 
 // restoreWebviewCookies re-injects the snapshotted session cookies into the
 // WebKit cookie manager. Called during App startup, before tabs load.
+// The restore itself runs on the GTK main thread (idle callback), because the
+// nested loops must live in the GTK default main context; this function only
+// schedules it and returns immediately. The cookie count is reported via the
+// exportCookiesRestored callback.
 func restoreWebviewCookies() (int, error) {
 	path, err := webviewCookiesPath()
 	if err != nil {
 		return 0, err
 	}
 	cpath := C.CString(path)
-	defer C.free(unsafe.Pointer(cpath))
-	n := int(C.restore_snapshot_sync(cpath))
-	if n > 0 {
-		logger.Printf("Restored %d webview cookies from %s", n, path)
+	C.restore_snapshot_async(cpath)
+	C.free(unsafe.Pointer(cpath))
+	logger.Printf("Webview cookie restore scheduled (%s)", path)
+	return 0, nil
+}
+
+//export exportCookiesRestored
+func exportCookiesRestored(count C.int, path *C.char) {
+	p := C.GoString(path)
+	if count > 0 {
+		logger.Printf("Restored %d webview cookies from %s", int(count), p)
 	}
-	return n, nil
 }
 
 // snapshotWebviewCookies dumps the cookies for a given URI into the JSON file.
