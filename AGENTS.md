@@ -1,9 +1,10 @@
 # AGENTS.md - Dashboard Development Guide
 
-A Go/Wails v2 desktop dashboard for monitoring three services:
-- **NeuroNet** - Neural network AI at `http://localhost:8000/admin`
-- **Minecraft Network** - Admin panel at `http://51.75.77.248:9800`
-- **SlotBuilder** - Backoffice at `https://backoffice.7casinogames.com`, frontend at `https://7casinogames.com`
+A Go/Wails v2 desktop dashboard for monitoring three services (shown here as
+generic placeholders — configure your own services/routes in `config.yaml`):
+- **Alpha** - an AI research/admin console at `http://localhost:8080/admin`
+- **Beta** - a gaming community network admin panel at `https://admin.example.com`
+- **Gamma** - a backoffice at `https://backoffice.example.com`, with a public frontend at `https://www.example.com`
 
 The app **works**: builds, runs, renders the UI, loads tabs from Go, and each tab is a
 **native WebKitWebView** (not an iframe). Chrome (header + tab bar) is a thin fixed
@@ -14,10 +15,12 @@ work. Tab **Web Notifications** are lifted to the desktop via D-Bus
 
 ## Project Structure
 ```
-/home/alfio/Projects/Dashboard/
+/path/to/Dashboard/
 ├── main.go                # EVERYTHING app-level: App struct, all Wails-bound methods, wails.Run()
 ├── tabs_shell.go          # cgo (package main): native tab shell — GtkStack + per-tab WebKitWebView (webkit2_41)
 ├── tabs_shell_export.go   # cgo: //export callbacks (shell title/uri → wails events) + shellCtx
+├── terminal.go            # cgo (package main): per-tab SSH/local terminal (VTE) in a GtkPaned split
+├── terminal_export.go     # cgo: //export callbacks (terminal state/split → wails events)
 ├── shell_app.go           # App methods: ShellShowTab/ShellDestroyTab/ShellReorder/ShellZoom/
 │                          #   ShellSetChromeHeight/OpenSettings/OpenNotes/TabsChanged + resolveTabURL
 ├── settings_bridge.go     # Bridge Go for the settings WINDOW (dispatch on App + __dashReply)
@@ -25,6 +28,7 @@ work. Tab **Web Notifications** are lifted to the desktop via D-Bus
 ├── notifications_bridge.go# cgo: closes a tab's WebKit notification on the GTK thread when its desktop notification is dismissed
 ├── inspector.go           # cgo: WebKitGTK page inspector per single tab webview (dock bottom/right/left/float)
 ├── persistent_cookies.go  # cgo: WebKitGTK cookie manager → SQLite persistent storage (webkit2_41)
+├── app_config.go          # App methods: GetAppConfig/SaveAppConfig — service config editing (url/auth/terminal)
 ├── wails.json             # Wails v2 config (embed dir: frontend/dist)
 ├── config.yaml            # Dev config; migrated into build/bin/data/config.yaml at first run
 ├── build.sh               # Build: npm run build + wails build -s -tags webkit2_41
@@ -64,7 +68,7 @@ work. Tab **Web Notifications** are lifted to the desktop via D-Bus
     ├── models/dashboard.go# Internal model types (services, dashboards, proxy)
     ├── notify/notify.go   # D-Bus org.freedesktop.Notifications client (desktop notifications): Notify/Replace + NotificationClosed
     ├── services/
-    │   ├── clients.go     # HTTPClient + NeuroNet/Minecraft/SlotBuilder clients + auth (env)
+    │   ├── clients.go     # HTTPClient + Alpha/Beta/Gamma clients + auth (env)
     │   ├── manager.go     # ServiceManager: CheckAllHealth + per-service dashboards
     │   └── proxy.go       # ProxyService: ReverseProxy handler, ProxyRequest, cookie inject/capture
     ├── tab/manager.go     # TabManager: persistent tabs (data/tabs.json)
@@ -82,7 +86,7 @@ The `App` struct holds everything: `cfg`, `manager`, `proxy`, `dashboardAPI`, `t
 `shellSetup()` (re-groups the window into the chrome strip + tab stack, see
 tabs_shell.go) and `refreshNotificationOrigins()` (pre-allow tab/service origins
 for Web Notifications, BEFORE the first web process launches) THEN `wails.Run()`.
-- `Frameless: true`, `SingleInstanceLock` (`it.alfio.Dashboard`), `OpenInspectorOnStartup: false`
+- `Frameless: true`, `SingleInstanceLock` (`com.example.Dashboard`), `OpenInspectorOnStartup: false`
   (the WebKit inspector is opened on demand from the header dropdown / Ctrl+Shift+F12 once
   the binary is built with the `devtools` tag, see inspector.go)
 - `Linux.WebviewGpuPolicy`: from config `ui.webview_gpu_policy` (`always` default → hardware
@@ -114,14 +118,64 @@ holds one **own WebKitWebView per tab**:
 - All Wails-bound Go methods go through `shell_request(...)` → `g_idle_add` →
   `shell_req_cb`, so every GTK/WebKit call happens on the GTK main thread. Ops:
   `0=setup, 1=show, 2=destroy, 3=reorder, 4=zoom, 5=chrome height, 6=open settings,
-  7=close settings, 8=inspector, 9=open notes, 10=close notes`. (each shell_* C function keeps a re-entrance guard
-  so the idle-reinvoked code path does not repackage twice).
+  7=close settings, 8=inspector, 9=open notes, 10=close notes` (each shell_* C function keeps a re-entrance guard
+  so the idle-reinvoked code path does not repackage twice), then the terminal ops
+  `11=toggle, 12=open/close, 13=destroy, 14=restart, 15=split` (see terminal.go).
 - **Home strip**: repackaging the WebKitView into `vbox` also REMOVES the roaming
   WebKit home-iframe whitespace/resize quirks on the tab strip (the DA does not
   stretch the strip or the stack).
 - The native tab shell replaced the old iframe/panel implementation: each tab is now
   a real browsing context (real cookies/localStorage/HSTS via the shared default
   web context, no CORS limits, inspector per tab).
+
+### terminal.go — per-tab SSH/local terminal (VTE in a GtkPaned split)
+Every tab can host a native **VTE terminal** (`vte-2.91`) in a **GtkPaned** split:
+- **Architecture**: the `GtkPaned` is created at TAB CREATION (shell_show_tab) with
+  the **webview as child1 and NO child2**. The webview is NEVER reparented — moving
+  a realized/mapped WebKitWebView into another container corrupts GTK's css/draw
+  state (blank page + `gtk_css_node_insert_after` assertions). Opening the terminal
+  only packs the termbox as child2; closing it removes child2 and the page fills the
+  box again. The terminal pane uses `resize=FALSE` + `term_paned_place` so it stays
+  glued to the bottom (vertical split) or right (horizontal) at a fixed height
+  (`TERM_TERM_PX 160`) while the page absorbs window resizes.
+- **Session state**: `term_session` per tab in `term_sessions` (GHashTable keyed by
+  tab id, deliberately leaked on tab destroy — a pending `g_child_watch` may still
+  reference the struct). Tracks `pid/running/visible/orient` + host/port/user/auth/
+  password/key/dir + the widgets (`bar`, `term`, `termbox`, `split_btn`, `paned`).
+- **Spawn**: remote host → `ssh -tt -o StrictHostKeyChecking=accept-new` (optional
+  `-p port`, `-i key`, `-l user@host`); password auth uses an `SSH_ASKPASS` helper
+  (`data/ssh-askpass.sh`, written by `ensureAskpassHelper()` in Go, echoing the
+  password from the `DASH_SSH_PASSWORD` env var — a non-NULL envv REPLACES the child
+  env, so the current environment is cloned first). No host → local `${SHELL}` in the
+  configured dir. `vte_terminal_spawn_async` + `g_child_watch_add`.
+- **Custom splitter drag** (tabs_shell.go, `shell_paned_*`): GtkPaned's default drag
+  is an internal `GtkGestureDrag` in TARGET phase that CLAIMS the pointer sequence
+  BEFORE the widget's `button-press-event` signal is emitted, so plain button-press
+  handlers can never intercept it. We attach our OWN `GtkGestureDrag` in **CAPTURE
+  phase** (capture controllers run first): it claims the sequence on separator hit
+  (±12px), then DURING the drag only tracks the target position + draws a 2px accent
+  guide line (`shell_paned_draw`, connect_after); `gtk_paned_set_position` is applied
+  ONCE on `drag-end`. This avoids the webview flash caused by resizing the page on
+  every motion (WebKit's accelerated compositing repaints asynchronously).
+- **Scrollbar**: VteTerminal is a `GtkScrollable` — without a host
+  `GtkScrolledWindow` it buffers scrollback but shows NO scrollbar. The terminal is
+  packed inside a `GtkScrolledWindow` (`#term-scroll`) with vertical `GTK_POLICY_AUTOMATIC`,
+  `vte_terminal_set_scrollback_lines(10000)`, `scroll_on_output=FALSE`,
+  `scroll_on_keystroke=TRUE`; the scrollbar appears only when scrollback overflows.
+- **Header bar** (`#term-bar`, styled via the CSS provider in shell_setup): host/user
+  label + split-orientation toggle (`⇆`/`⇅`, `term_split_cb` → `term_apply_split` +
+  `exportShellTerminalSplit` persists the choice) + Restart + Close.
+- **Entry points** (ops 11-15 in shell_req_cb, run on the GTK thread):
+  `shell_terminal_toggle/open/close/restart/split/destroy/kill` (kill = SIGHUP the pty
+  child before tearing down a tab box).
+- **App methods / Go side**: `terminalParams(tab)` resolves SSH params from the
+  service `TerminalConfig` (service matched by key OR by URL prefix via
+  `serviceKeyForURL`); custom tabs get a local shell; `TerminalToggle/Open/Close/
+  Restart/Split` (+ NoContext twins) enqueue ops 11-15. `TerminalSplit` persists
+  `terminal.split` ("v"/"h") in config.yaml and re-applies it live.
+- **State → chrome**: `exportShellTerminalState`/`exportShellTerminalSplit`
+  (terminal_export.go) emit the wails event `shell:terminal-state`
+  `{tabId, running, visible}` so the tab bar can reflect terminal state.
 
 ### Tab notifications → desktop (Web Notifications API, WebKitGTK 2.52)
 Tab pages are real webviews, so they can use the Web Notifications API
@@ -193,6 +247,15 @@ Every `App` method below also has a `...NoContext` twin (frontend calls those):
 - `refreshNotificationOrigins()` — rebuilds the pre-allowed Web Notification origins
   (see "Tab notifications → desktop")
 
+### app_config.go — service config editing
+Wails-bound service configuration editor used by the Settings window:
+- `GetAppConfig()` — returns the whole config as a generic map (services, proxy, ui)
+- `SaveAppConfig(patch)` — merges the patch into `config.yaml`: edits/validates
+  service url/auth/terminal fields (`app_config.go`), then reconfigures the live
+  `ServiceManager` and `ProxyService` at runtime (`Reconfigure` keeps the cookie jar)
+- Helpers `serviceConfigMap`/`asMapSafe`/`asStringSafe`/... serialize the config
+  into the JSON-shaped maps the frontend expects.
+
 ### Wails method binding pattern (IMPORTANT)
 Every frontend-callable method exists in TWO forms on `App`:
 - `Method(ctx context.Context, args...)` — Wails' usual signature
@@ -206,7 +269,7 @@ only when `cfg.Proxy.Enabled`.
 ### internal/api/dashboard.go
 `DashboardAPI` (service health + per-service dashboards, delegating to ServiceManager)
 and `TabAPI` (tab CRUD):
-- `TabAPI.ListTabs` — if tabs.json is empty, seeds the 3 defaults (neuronet/minecraft/slotbuilder)
+- `TabAPI.ListTabs` — if tabs.json is empty, seeds the 3 defaults (alpha/beta/gamma)
 - `TabAPI.UpdateTab(id, config)` — updates label/url/icon from a `map[string]interface{}`
 - `TabAPI.UpdateTabSettings(id, settings)` — replaces the per-tab display settings bag
 - `TabAPI.GetNotes(id)` / `TabAPI.SaveNotes(id, notes)` — per-tab persistent notes
@@ -253,8 +316,8 @@ NOTE: since tabs became native webviews the proxy is no longer required for the 
 
 ### internal/services/{clients,manager}.go
 `HTTPClient` wraps an `http.Client`; `addAuth` applies config `Auth.Type`:
-- `basic` → username/password from env vars (MINECRAFT_USER/PASS)
-- `bearer` → token from env (SLOTBUILDER_TOKEN)
+- `basic` → username/password from env vars (BETA_USER/PASS)
+- `bearer` → token from env (GAMMA_TOKEN)
 `ServiceManager` owns one client per configured service; `CheckAllHealth` probes each
 (5s timeout) and `GetXxxDashboard` gathers lists (used by the health/status pills).
 
@@ -309,7 +372,7 @@ runtime (custom bridge). Any vite.config change needs a full rebuild.
 5. **Native tab lifecycle** (keep-alive): `switchTab(tab)` calls `api.shellShowTab(tab.id)`
    and tracks the active id. `loadTabs()` removes webviews of deleted tabs via
    `knownTabIds` (per-process) → `api.shellDestroyTab(id)`; respects
-   `dashboardStore.getDefaultTab()` (localStorage `dashboard_default_tab`, default 'neuronet').
+   `dashboardStore.getDefaultTab()` (localStorage `dashboard_default_tab`, default 'alpha').
 6. Events from Go: `runtime.EventsOn('shell:title')` → `tabBar.setPageTitle(id, title)`;
    `EventsOn('tabs:changed')` (emitted by the settings window after edits) → `loadTabs({preserveActive:true})`.
 7. `loadServiceStatus()` every 30s + on visibilitychange → `tabBar.setStatuses()`.
@@ -320,13 +383,13 @@ runtime (custom bridge). Any vite.config change needs a full rebuild.
     `zoom` (0.5–2.5) is applied NATIVELY via `api.shellZoom(id, level)` at show time +
     live; the SettingsModal zoom slider calls the same path.
 11. **Persistent per-tab notes** — the editor is a DEDICATED floating window (like the
-    Impostazioni window), NOT a DOM card in the chrome: `openNotes(tab)` →
+    Settings window), NOT a DOM card in the chrome: `openNotes(tab)` →
     `api.openNotes(tab.id)` → `App.OpenNotes` → `shell_open_notes` (tabs_shell.go)
     opens `wails://wails/notes.html?tab=<id>`. Every save goes through the notes
     bridge → `TabAPI.SaveNotes` (persisted in `data/tabs.json`), then a
     `TabsChanged()` so the chrome refreshes the per-tab note indicator. Because the
     editor lives in its own window the chrome strip is never expanded and the tab
-    pages never shift while editing notes. Open from the tab context menu **Nota** or
+    pages never shift while editing notes. Open from the tab context menu **Note** or
     the per-tab `tab-note-btn`; the settings window's per-tab panel still hosts a
     notes textarea (saves via the `saveNotes` bridge method).
 11. **Inspector dropdown** (header, right of settings) — `api.inspectorOpen(mode, activeTabId)`
@@ -356,7 +419,7 @@ updateTab/updateTabSettings/getNotes/saveNotes/reorderTabs/tabsChanged/closeSett
   over the `.modal-header` (walking ancestors; `BUTTON`/`.btn` elements are
   excluded so the close button stays clickable); only then starts a GTK
   move-drag (`gtk_window_begin_move_drag`).
-- **Chiudi** closes the whole window: `SettingsModal.close()` → `onClose` →
+- **Close** closes the whole window: `SettingsModal.close()` → `onClose` →
   `closeSettings` → `shell_close_settings` destroys the window+ucm (recreated on
   next open); a `delete-event` instead only hides it.
 - **Not modal, stays on top**: the window is `transient_for` + `keep_above` —
@@ -446,9 +509,9 @@ tab content itself is native webviews handled by the Go shell.
   removed from the Settings modal (no close X / middle-click).
 - **Drag & drop** reordering: HTML5 dragstart/dragover/drop on `.tab-bar-item`;
   on drop it re-slices `this.tabs` and calls `onReorder(ids)`.
-- **Context menu** (right click): Rinomina (inline input), Imposta come predefinito,
-  Apri in browser, Duplica, **Nota** (opens the dedicated per-tab notes window),
-  Zoom −/%/+ (keep-open), Reimposta zoom (toolbar removed with the iframe era).
+- **Context menu** (right click): Rename (inline input), Set as default,
+  Open in browser, Duplicate, **Note** (opens the dedicated per-tab notes window),
+  Zoom −/%/+ (keep-open), Reset zoom (toolbar removed with the iframe era).
   `setDefaultTabId()` marks the default.
 - **Persistent per-tab notes**: every pill has a small `tab-note-btn` (icon) that
   opens the dedicated notes window for that tab; it turns warning-coloured when the
@@ -489,16 +552,16 @@ and `data/cache` so WebKitGTK website data stays portable too.
 ```yaml
 app: {name: Dashboard, version: 1.0.0, debug: true}
 services:               # per-service: base_url, backoffice_url, api_prefix,
-  neuronet: {...}       #   auth: {type: none|basic|bearer, *_env}, endpoints, proxy_enabled
-minecraft/slotbuilder: ...
+  alpha: {...}         #   auth: {type: none|basic|bearer, *_env}, endpoints, proxy_enabled
+beta/gamma: ...
 proxy: {enabled, allowed_hosts, timeout_seconds, max_body_size_mb}
-ui: {theme: dark, default_tab: neuronet, webview_gpu_policy: always, tabs: [{id,label,icon,enabled}]}
+ui: {theme: dark, default_tab: alpha, webview_gpu_policy: always, tabs: [{id,label,icon,enabled}]}
 ```
 ### Auth env vars (never commit real values)
 ```bash
-export MINECRAFT_USER=xxx
-export MINECRAFT_PASS=xxx
-export SLOTBUILDER_TOKEN=xxx
+export BETA_USER=xxx
+export BETA_PASS=xxx
+export GAMMA_TOKEN=xxx
 ```
 
 ## Known Gotchas
@@ -548,7 +611,7 @@ export SLOTBUILDER_TOKEN=xxx
    header pills go offline (no panels any more).
 9. **DOM popups need strip expansion**: the chrome strip is ~104px, so any DOM popup
    (tab context menu, inspector dropdown) is clipped. app.js expands
-   the strip to ∃480px (`expandStrip` — `EXPANDED_STRIP`) while the popup is open and
+   the strip to ~480px (`expandStrip` — `EXPANDED_STRIP`) while the popup is open and
    collapses it on close (`stripExpanded` guard; `syncChromeHeight` is skipped while
    expanded). The height is deliberately MODERATE so the tab pages (GtkStack below
    the strip) stay visible; a taller strip (e.g. 2400) would collapse the pages out
@@ -595,10 +658,26 @@ export SLOTBUILDER_TOKEN=xxx
     (captured when launching with `>log 2>&1`), bypassing the Go `dashboard.log`
     entirely — the fastest way to see which WebKit signals actually fire. Remove them
     before committing.
+16. **GtkPaned drag is a GtkGestureDrag, not a button-press handler** — GTK3 drives
+    the paned separator drag with an internal `GtkGestureDrag` in TARGET phase that
+    claims the pointer sequence before `button-press-event` is delivered. A plain
+    `g_signal_connect(paned, "button-press-event", ...)` handler NEVER fires for
+    separator presses. To intercept, add your own `GtkGestureDrag` in **CAPTURE
+    phase** (`gtk_event_controller_set_propagation_phase(..., GTK_PHASE_CAPTURE)`) —
+    capture controllers run first, so it can claim the sequence and the paned's own
+    gesture gets denied. Custom drags must also apply `gtk_paned_set_position` ONCE on
+    release (live per-motion resize of a WebKitWebView flashes: async accelerated
+    compositing repaints).
+17. **VTE needs a GtkScrolledWindow for a scrollbar** — VteTerminal is a `GtkScrollable`:
+    it buffers scrollback internally but shows NO scrollbar unless hosted inside a
+    `GtkScrolledWindow`. Pack it in one with vertical `GTK_POLICY_AUTOMATIC` and set
+    `vte_terminal_set_scrollback_lines(> 0)` (positive) or the buffer stays at the
+    default 512 lines. `scroll_on_output=FALSE` avoids jumping to the bottom on every
+    line of output; `scroll_on_keystroke=TRUE` returns to the bottom when typing.
 
 ## Debugging Commands
 ```bash
-cd /home/alfio/Projects/Dashboard
+cd /path/to/Dashboard
 
 # Build frontend
 cd frontend && npm run build
