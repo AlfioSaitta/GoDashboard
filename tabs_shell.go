@@ -156,7 +156,13 @@ static void shell_setup(void)
 		"#term-bar { background-color: #161b26; border-top: 1px solid #2a3040; }"
 		"#term-bar label { color: #c9d1d9; font-family: monospace; font-size: 11px; padding: 3px 10px; }"
 		"#term-bar button { background: transparent; border: none; color: #8b949e; padding: 0 10px; min-width: 24px; min-height: 0; }"
-		"#term-bar button:hover { color: #e6edf3; background: #21262d; }", -1, NULL);
+		"#term-bar button:hover { color: #e6edf3; background: #21262d; }"
+		"#term-scroll { background-color: #0d1117; }"
+		"#term-scroll scrollbar, #term-scroll scrollbar slider { background: transparent; border: none; }"
+		"#term-scroll scrollbar.vertical { min-width: 10px; }"
+		"#term-scroll scrollbar.vertical slider { background: #30363d; border-radius: 5px; min-width: 6px; margin: 1px; }"
+		"#term-scroll scrollbar.vertical slider:hover { background: #484f58; }"
+		"#term-scroll scrollbar.vertical slider:active { background: #58a6ff; }", -1, NULL);
 	gtk_style_context_add_provider_for_screen(
 		gdk_screen_get_default(), GTK_STYLE_PROVIDER(css),
 		GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
@@ -214,6 +220,116 @@ static void shell_notif_permissions_install(void)
 	g_signal_connect(webkit_web_context_get_default(),
 		"initialize-notification-permissions",
 		G_CALLBACK(shell_notif_init_permissions), NULL);
+}
+
+// --- custom paned drag --------------------------------------------------------
+//
+// Dragging the terminal splitter resizes the webview (child1) on every motion
+// event. With WebKit's accelerated compositing the repaint is async, so the
+// webview briefly shows its background colour between frames (a flash). The
+// default GtkPaned drag does that live resize. We replace it with a custom
+// drag: while the pointer moves we only track the target position and draw a
+// guide line; gtk_paned_set_position is applied on button release, so the
+// webview is resized exactly once per drag.
+//
+// GTK3's GtkPaned drives its own drag with an internal GtkGestureDrag running
+// in the TARGET propagation phase, which claims the pointer sequence BEFORE
+// the widget's "button-press-event" signal is emitted (gtkwidget.c
+// gtk_widget_event_internal). So a plain button-press handler can never beat
+// it. We instead attach our OWN GtkGestureDrag in the CAPTURE phase: capture
+// controllers run first, so we claim the sequence and the paned's gesture is
+// then denied (its drag-begin set_state(CLAIMED) fails and does nothing).
+
+static void shell_paned_drag_begin(GtkGestureDrag *gesture, gdouble x, gdouble y, gpointer data)
+{
+	GtkWidget *paned = data;
+	// No terminal open (child2 missing): nothing to split, let the event pass.
+	if (!gtk_paned_get_child2(GTK_PANED(paned))) {
+		gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
+		return;
+	}
+	int pos = gtk_paned_get_position(GTK_PANED(paned));
+	int tol = 12; // separator/handle hit tolerance
+	int hit;
+	if (gtk_orientable_get_orientation(GTK_ORIENTABLE(paned)) == GTK_ORIENTATION_VERTICAL)
+		hit = (y >= pos - tol && y <= pos + tol);
+	else
+		hit = (x >= pos - tol && x <= pos + tol);
+	if (!hit) {
+		gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_DENIED);
+		return;
+	}
+	gtk_gesture_set_state(GTK_GESTURE(gesture), GTK_EVENT_SEQUENCE_CLAIMED);
+	g_object_set_data(G_OBJECT(paned), "term-drag", GINT_TO_POINTER(1));
+	g_object_set_data(G_OBJECT(paned), "term-drag-pos", GINT_TO_POINTER(pos));
+	gtk_widget_queue_draw(paned);
+}
+
+static void shell_paned_drag_update(GtkGestureDrag *gesture, gdouble dx, gdouble dy, gpointer data)
+{
+	GtkWidget *paned = data;
+	if (!g_object_get_data(G_OBJECT(paned), "term-drag"))
+		return;
+	GtkAllocation a;
+	gtk_widget_get_allocation(paned, &a);
+	gboolean vert = gtk_orientable_get_orientation(GTK_ORIENTABLE(paned)) == GTK_ORIENTATION_VERTICAL;
+	double sx, sy;
+	gtk_gesture_drag_get_start_point(gesture, &sx, &sy);
+	int total = vert ? a.height : a.width;
+	int v = (int)(vert ? (sy + dy) : (sx + dx));
+	if (v < 1) v = 1;
+	if (v > total - 1) v = total - 1;
+	g_object_set_data(G_OBJECT(paned), "term-drag-pos", GINT_TO_POINTER(v));
+	gtk_widget_queue_draw(paned);
+}
+
+static void shell_paned_drag_end(GtkGestureDrag *gesture, gdouble dx, gdouble dy, gpointer data)
+{
+	GtkWidget *paned = data;
+	if (!g_object_get_data(G_OBJECT(paned), "term-drag"))
+		return;
+	int pos = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(paned), "term-drag-pos"));
+	g_object_set_data(G_OBJECT(paned), "term-drag", GINT_TO_POINTER(0));
+	if (pos > 0)
+		gtk_paned_set_position(GTK_PANED(paned), pos);
+	gtk_widget_queue_draw(paned);
+}
+
+static gboolean shell_paned_draw(GtkWidget *paned, cairo_t *cr, gpointer data)
+{
+	if (!g_object_get_data(G_OBJECT(paned), "term-drag"))
+		return FALSE;
+	int pos = GPOINTER_TO_INT(g_object_get_data(G_OBJECT(paned), "term-drag-pos"));
+	GtkAllocation a;
+	gtk_widget_get_allocation(paned, &a);
+	gboolean vert = gtk_orientable_get_orientation(GTK_ORIENTABLE(paned)) == GTK_ORIENTATION_VERTICAL;
+	cairo_save(cr);
+	cairo_set_source_rgb(cr, 0.24, 0.35, 0.75); // accent guide line
+	if (vert) {
+		cairo_move_to(cr, 0, pos);
+		cairo_line_to(cr, a.width, pos);
+	} else {
+		cairo_move_to(cr, pos, 0);
+		cairo_line_to(cr, pos, a.height);
+	}
+	cairo_set_line_width(cr, 2.0);
+	cairo_stroke(cr);
+	cairo_restore(cr);
+	return FALSE;
+}
+
+static void shell_paned_install_drag(GtkWidget *paned)
+{
+	// CAPTURE-phase gesture: it sees the pointer press before the paned's own
+	// TARGET-phase drag gesture, so it can claim the sequence first. See the
+	// comment block at the top of this section.
+	GtkGesture *g = gtk_gesture_drag_new(paned);
+	gtk_event_controller_set_propagation_phase(GTK_EVENT_CONTROLLER(g),
+	                                           GTK_PHASE_CAPTURE);
+	g_signal_connect(g, "drag-begin", G_CALLBACK(shell_paned_drag_begin), paned);
+	g_signal_connect(g, "drag-update", G_CALLBACK(shell_paned_drag_update), paned);
+	g_signal_connect(g, "drag-end", G_CALLBACK(shell_paned_drag_end), paned);
+	g_signal_connect_after(paned, "draw", G_CALLBACK(shell_paned_draw), NULL);
 }
 
 // Each tab lives inside a GtkBox stack child ("tab-<id>-box") that carries the
@@ -392,6 +508,12 @@ static void shell_show_tab(int id, const char *url, double zoom)
 		box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 		g_object_set_data(G_OBJECT(box), "tab-id", GINT_TO_POINTER(id));
 		WebKitWebView *wv = WEBKIT_WEB_VIEW(webkit_web_view_new());
+		// Avoid the whole-widget redraw GTK queues on every allocation change
+		// (the webview manages its own repaint). Background is set to the chrome
+		// color so any transient gap during a resize is dark, not default white.
+		gtk_widget_set_redraw_on_allocate(GTK_WIDGET(wv), FALSE);
+		GdkRGBA bg = { 0.063, 0.078, 0.114, 1.0 }; // #10141d, matches #shell-stack
+		webkit_web_view_set_background_color(wv, &bg);
 		g_object_set_data(G_OBJECT(wv), "tab-id", GINT_TO_POINTER(id));
 		WebKitSettings *set = webkit_web_view_get_settings(wv);
 		webkit_settings_set_enable_developer_extras(set, TRUE);
@@ -409,6 +531,7 @@ static void shell_show_tab(int id, const char *url, double zoom)
 		gtk_widget_set_hexpand(paned, TRUE);
 		gtk_widget_set_vexpand(paned, TRUE);
 		g_object_set_data(G_OBJECT(box), "term-paned", paned);
+		shell_paned_install_drag(paned);
 		gtk_paned_pack1(GTK_PANED(paned), GTK_WIDGET(wv), TRUE, FALSE);
 		gtk_box_pack_start(GTK_BOX(box), paned, TRUE, TRUE, 0);
 		gtk_widget_show(paned);

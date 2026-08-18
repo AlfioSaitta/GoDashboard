@@ -381,13 +381,25 @@ static term_session *term_create(int id, const char *host, int port, const char 
 
 	s->bar = term_bar_new(s);
 	s->term = vte_terminal_new();
-	gtk_widget_set_hexpand(s->term, TRUE);
-	gtk_widget_set_vexpand(s->term, TRUE);
+	// Scrollback: VteTerminal is a GtkScrollable — without a host
+	// GtkScrolledWindow it can buffer scrollback but has NO visible scrollbar.
+	vte_terminal_set_scrollback_lines(VTE_TERMINAL(s->term), 10000);
+	vte_terminal_set_scroll_on_output(VTE_TERMINAL(s->term), FALSE);
+	vte_terminal_set_scroll_on_keystroke(VTE_TERMINAL(s->term), TRUE);
+	GtkWidget *scr = gtk_scrolled_window_new(NULL, NULL);
+	gtk_widget_set_name(scr, "term-scroll");
+	gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scr),
+	                               GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+	gtk_scrolled_window_set_overlay_scrolling(GTK_SCROLLED_WINDOW(scr), FALSE);
+	gtk_widget_set_hexpand(scr, TRUE);
+	gtk_widget_set_vexpand(scr, TRUE);
+	gtk_container_add(GTK_CONTAINER(scr), s->term);
+	gtk_widget_show(s->term);
 	s->termbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
 	gtk_box_pack_start(GTK_BOX(s->termbox), s->bar, FALSE, FALSE, 0);
-	gtk_box_pack_start(GTK_BOX(s->termbox), s->term, TRUE, TRUE, 0);
+	gtk_box_pack_start(GTK_BOX(s->termbox), scr, TRUE, TRUE, 0);
+	gtk_widget_show(scr);
 	gtk_widget_show(s->bar);
-	gtk_widget_show(s->term);
 
 	// NOTE: the webview is NOT hidden — the paned shares the box between the
 	// page and the terminal (see term_apply_split).
