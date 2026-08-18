@@ -67,6 +67,19 @@ export const api = {
     return wails.ShellZoomNoContext(Number(tabId), Number(level))
   },
 
+  async shellNav(tabId, action) {
+    // action: 'back' | 'forward' | 'reload' | 'stop' (id<=0 targets the chrome strip)
+    const actions = {
+      back: wails.ShellBackNoContext,
+      forward: wails.ShellForwardNoContext,
+      reload: wails.ShellReloadNoContext,
+      stop: wails.ShellStopNoContext,
+    }
+    const fn = actions[action]
+    if (!fn) return
+    return fn(Number(tabId))
+  },
+
   async shellSetChromeHeight(height) {
     return wails.ShellSetChromeHeightNoContext(Number(height))
   },

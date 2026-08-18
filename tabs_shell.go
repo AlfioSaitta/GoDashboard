@@ -43,6 +43,7 @@ static int shell_chrome_h = 104;             // default strip height (px)
 
 extern void exportShellTitle(int id, const char *title);
 extern void exportShellUri(int id, const char *uri);
+extern void exportShellNavState(int id, int canBack, int canFwd, int loading);
 extern void exportSettingsMessage(const char *msg);
 extern void exportNotesMessage(const char *msg);
 extern void exportShellNotification(guint64 id, const char *title, const char *body);
@@ -400,6 +401,23 @@ static void shell_uri_cb(GObject *o, GParamSpec *p, gpointer d)
 	int id = GPOINTER_TO_INT(d);
 	const char *u = webkit_web_view_get_uri(WEBKIT_WEB_VIEW(o));
 	exportShellUri(id, u ? u : "");
+	// Navigation state (back/forward availability, loading) can change on any
+	// load progress tick; keep the chrome chrom buttons in sync.
+	exportShellNavState(id,
+		webkit_web_view_can_go_back(WEBKIT_WEB_VIEW(o)) ? 1 : 0,
+		webkit_web_view_can_go_forward(WEBKIT_WEB_VIEW(o)) ? 1 : 0,
+		webkit_web_view_is_loading(WEBKIT_WEB_VIEW(o)) ? 1 : 0);
+}
+
+// Fires continuously while a page loads (progress 0..1) so the chrome can show
+// the reload->stop state switch and keep the back/forward availability updated.
+static void shell_load_state_cb(WebKitWebView *wv, GParamSpec *p, gpointer d)
+{
+	int id = GPOINTER_TO_INT(d);
+	exportShellNavState(id,
+		webkit_web_view_can_go_back(wv) ? 1 : 0,
+		webkit_web_view_can_go_forward(wv) ? 1 : 0,
+		webkit_web_view_is_loading(wv) ? 1 : 0);
 }
 
 // --- tab notifications -> desktop -------------------------------------------
@@ -519,6 +537,7 @@ static void shell_show_tab(int id, const char *url, double zoom)
 		webkit_settings_set_enable_developer_extras(set, TRUE);
 		g_signal_connect(G_OBJECT(wv), "notify::title", G_CALLBACK(shell_title_cb), GINT_TO_POINTER(id));
 		g_signal_connect(G_OBJECT(wv), "notify::uri", G_CALLBACK(shell_uri_cb), GINT_TO_POINTER(id));
+		g_signal_connect(G_OBJECT(wv), "notify::estimated-load-progress", G_CALLBACK(shell_load_state_cb), GINT_TO_POINTER(id));
 		g_signal_connect(G_OBJECT(wv), "permission-request", G_CALLBACK(shell_notif_permission), NULL);
 		g_signal_connect(G_OBJECT(wv), "show-notification", G_CALLBACK(shell_notif_shown), NULL);
 		gtk_widget_show(GTK_WIDGET(wv));
@@ -645,6 +664,21 @@ static void shell_zoom(int id, double level)
 	WebKitWebView *wv = (id > 0) ? shell_find_tab(id) : shell_chrome;
 	if (wv && level > 0.01)
 		webkit_web_view_set_zoom_level(wv, level);
+}
+
+// Navigation helpers for the chrome strip controls. action: 0=back, 1=forward,
+// 2=reload, 3=stop loading. id<=0 targets the chrome strip itself.
+static void shell_nav(int id, int action)
+{
+	WebKitWebView *wv = (id > 0) ? shell_find_tab(id) : shell_chrome;
+	if (!wv)
+		return;
+	switch (action) {
+	case 0: webkit_web_view_go_back(wv); break;
+	case 1: webkit_web_view_go_forward(wv); break;
+	case 2: webkit_web_view_reload(wv); break;
+	case 3: webkit_web_view_stop_loading(wv); break;
+	}
 }
 
 // --- settings window -------------------------------------------------------
@@ -1419,7 +1453,7 @@ typedef struct {
 	               // 8 inspector, 9 open notes, 10 close notes,
 	               // 11 terminal toggle, 12 terminal open/close,
 	               // 13 terminal destroy, 14 terminal restart, 15 terminal split,
-	               // 16 precreate tab webviews
+	               // 16 precreate tab webviews, 17 navigation (back/fwd/reload/stop)
 	int id;
 	double zoom;
 	int height;
@@ -1477,6 +1511,7 @@ static gboolean shell_req_cb(gpointer data)
 		shell_set_precreate_ids(req->ids, req->n);
 		shell_precreate_start();
 		break;
+	case 17: shell_nav(req->id, req->op_extra); break;
 	}
 	if (req->url) g_free(req->url);
 	if (req->ids) g_free(req->ids);
@@ -1559,6 +1594,12 @@ func shellPostIDs(op int, ids []int) {
 		arr = (*C.int)(unsafe.Pointer(&ids[0]))
 	}
 	C.shell_request(C.int(op), 0, nil, 0, 0, arr, C.int(len(ids)), 0)
+}
+
+// shellPostNav enqueues a navigation op on a tab webview (action 0=back,
+// 1=forward, 2=reload, 3=stop). id<=0 targets the chrome strip webview.
+func shellPostNav(id, action int) {
+	C.shell_request(C.int(17), C.int(id), nil, 0, 0, nil, 0, C.int(action))
 }
 
 func shellPostInspector(mode string, tabID int) {

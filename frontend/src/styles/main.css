@@ -261,6 +261,86 @@ button:focus:not(:focus-visible) {
   flex-shrink: 0;
 }
 
+/* ── Page navigation controls (active tab): back/forward/reload/stop + zoom ── */
+
+.tab-nav-controls {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 0.9rem;
+  padding-right: 0.9rem;
+  border-right: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  background: transparent;
+  color: var(--fg-secondary);
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  cursor: pointer;
+  transition: background var(--transition), color var(--transition),
+    border-color var(--transition), opacity var(--transition);
+}
+
+.nav-btn svg {
+  flex-shrink: 0;
+}
+
+.nav-reload.nav-loading svg {
+  animation: spin 0.8s linear infinite;
+}
+
+.nav-btn:hover:not(:disabled) {
+  background: var(--bg-tertiary);
+  color: var(--fg-primary);
+  border-color: var(--border);
+}
+
+.nav-btn:active:not(:disabled) {
+  background: var(--bg-active);
+}
+
+.nav-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-bg);
+}
+
+.nav-btn:disabled {
+  opacity: 0.32;
+  cursor: default;
+}
+
+.nav-zoom-label {
+  min-width: 46px;
+  padding: 0 6px;
+  font-size: 0.72rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+  cursor: default;
+}
+
+.nav-zoom-label:not(:disabled) {
+  cursor: pointer;
+}
+
+.nav-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 5px;
+  background: var(--border);
+  flex-shrink: 0;
+}
+
 /* Per-tab service status dot */
 
 .tab-status-dot {
@@ -284,39 +364,68 @@ button:focus:not(:focus-visible) {
   box-shadow: 0 0 6px rgba(255, 92, 122, 0.6);
 }
 
-/* Per-tab persistent-notes access button (next to the pill) */
+/* Per-tab action buttons (terminal SSH + persistent notes). Ghost buttons with
+   a comfortable hit area, always faintly visible, accent on hover; the terminal
+   button turns into an accent "open" state while the terminal is shown and the
+   note button glows warning-coloured while the tab has notes. */
 
+.tab-terminal-btn,
 .tab-note-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  margin-left: -2px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   background: transparent;
   color: var(--fg-muted);
-  border: none;
+  border: 1px solid transparent;
   border-radius: 9999px;
   cursor: pointer;
-  opacity: 0.55;
+  opacity: 0.85;
   flex-shrink: 0;
   transition: all var(--transition);
 }
 
+.tab-terminal-btn {
+  margin-left: 1px;
+}
+
+.tab-note-btn {
+  margin-left: 0;
+}
+
+.tab-terminal-btn svg,
 .tab-note-btn svg {
   pointer-events: none;
 }
 
+.tab-bar-item:hover .tab-terminal-btn,
 .tab-bar-item:hover .tab-note-btn {
   opacity: 1;
 }
 
-.tab-note-btn:hover {
+.tab-terminal-btn:hover,
+.tab-note-btn:hover,
+.tab-terminal-btn:focus-visible,
+.tab-note-btn:focus-visible {
   color: var(--accent);
   background: var(--accent-bg);
+  border-color: var(--accent-border);
+  outline: none;
 }
 
+/* Terminal open: the pill shows an accent-filled square so the state is obvious
+   even when the terminal is only seen from the tab bar. */
+.tab-terminal-btn.open {
+  opacity: 1;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border-color: var(--accent-border);
+  box-shadow: inset 0 0 0 1px var(--accent-border);
+}
+
+/* Notes present: warning-coloured note icon. */
 .tab-note-btn.has-note {
   opacity: 1;
   color: var(--warning);
@@ -324,39 +433,6 @@ button:focus:not(:focus-visible) {
 
 .tab-note-btn.has-note:hover {
   color: var(--accent);
-}
-
-/* Per-tab SSH terminal access button (next to the pill, before the note btn) */
-
-.tab-terminal-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 18px;
-  height: 18px;
-  margin-left: -2px;
-  padding: 0;
-  background: transparent;
-  color: var(--fg-muted);
-  border: none;
-  border-radius: 9999px;
-  cursor: pointer;
-  opacity: 0.55;
-  flex-shrink: 0;
-  transition: all var(--transition);
-}
-
-.tab-terminal-btn svg {
-  pointer-events: none;
-}
-
-.tab-bar-item:hover .tab-terminal-btn {
-  opacity: 1;
-}
-
-.tab-terminal-btn:hover {
-  color: var(--accent);
-  background: var(--accent-bg);
 }
 
 /* Drag & drop */

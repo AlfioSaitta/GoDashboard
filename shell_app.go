@@ -100,6 +100,42 @@ func (a *App) ShellZoomNoContext(id int, level float64) {
 	a.ShellZoom(context.Background(), id, level)
 }
 
+// ShellBack navigates the given tab's webview back in its history.
+func (a *App) ShellBack(ctx context.Context, id int) {
+	shellPostNav(id, 0)
+}
+
+func (a *App) ShellBackNoContext(id int) {
+	a.ShellBack(context.Background(), id)
+}
+
+// ShellForward navigates the given tab's webview forward in its history.
+func (a *App) ShellForward(ctx context.Context, id int) {
+	shellPostNav(id, 1)
+}
+
+func (a *App) ShellForwardNoContext(id int) {
+	a.ShellForward(context.Background(), id)
+}
+
+// ShellReload reloads the page of the given tab's webview.
+func (a *App) ShellReload(ctx context.Context, id int) {
+	shellPostNav(id, 2)
+}
+
+func (a *App) ShellReloadNoContext(id int) {
+	a.ShellReload(context.Background(), id)
+}
+
+// ShellStop aborts the ongoing load of the given tab's webview.
+func (a *App) ShellStop(ctx context.Context, id int) {
+	shellPostNav(id, 3)
+}
+
+func (a *App) ShellStopNoContext(id int) {
+	a.ShellStop(context.Background(), id)
+}
+
 // ShellSetChromeHeight resizes the chrome strip webview to the measured height
 // of header + tab bar (reported by the frontend). The frontend also temporarily
 // grows the strip (to ~480px, see EXPANDED_STRIP in app.js) while a DOM popup

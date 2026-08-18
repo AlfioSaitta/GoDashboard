@@ -50,6 +50,21 @@ func exportShellUri(id C.int, uri *C.char) {
 	})
 }
 
+// exportShellNavState is called by the C shim (on the GTK main thread)
+// whenever a tab page's navigation state changes (back/forward availability,
+// loading progress). The chrome strip uses it to enable/disable the back,
+// forward and reload/stop buttons.
+//
+//export exportShellNavState
+func exportShellNavState(id C.int, canBack, canFwd, loading C.int) {
+	wailsRuntime.EventsEmit(shellCtx, "shell:nav-state", map[string]interface{}{
+		"tabId":        int(id),
+		"canGoBack":    int(canBack) == 1,
+		"canGoForward": int(canFwd) == 1,
+		"loading":      int(loading) == 1,
+	})
+}
+
 // exportSettingsMessage is called by the C shim whenever the settings webview
 // posts a bridge message ("dashboardSettings", see tabs_shell.go). The message
 // is a JSON {id, method, args} box handled by settings_bridge.go.

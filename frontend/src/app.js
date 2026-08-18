@@ -165,6 +165,7 @@ async function mountChrome() {
     tab.settings = merged
     api.shellZoom(tab.id, clampZoom(z)).catch(() => {})
     api.updateTabSettings(tab.id, merged).catch(err => console.error('Failed to save tab settings:', err))
+    tabBar.refreshNavControls()
   }
 
   const tabBar = new TabBar(document.getElementById('tab-bar'), {
@@ -213,6 +214,9 @@ async function mountChrome() {
     onTerminal: (tab) => {
       api.terminalToggle(tab.id).catch(err => console.error('Failed to toggle terminal:', err))
     },
+    onNav: (tabId, action) => {
+      api.shellNav(tabId, action).catch(err => console.error('Failed to navigate:', err))
+    },
     onPopupChange: (open) => { if (open) expandStrip(); else collapseStrip() },
   })
 
@@ -231,6 +235,19 @@ async function mountChrome() {
   runtime.EventsOn('shell:title', (data) => {
     if (!data || data.tabId == null) return
     tabBar.setPageTitle(String(data.tabId), data.title)
+  })
+
+  // Navigation state (back/forward availability, loading) of the native tab
+  // pages → enables/disables the chrome tab-bar navigation controls.
+  runtime.EventsOn('shell:nav-state', (data) => {
+    if (!data || data.tabId == null) return
+    tabBar.setNavState(data.tabId, data)
+  })
+
+  // Per-tab terminal running/visible state → marks the terminal pill button.
+  runtime.EventsOn('shell:terminal-state', (data) => {
+    if (!data || data.tabId == null) return
+    tabBar.setTerminalState(data.tabId, data)
   })
 
   // The Impostazioni window notifies us whenever the tab list changed.
@@ -450,6 +467,11 @@ async function mountChrome() {
       if (e.key === '=' || e.key === '+') setTabZoom(activeTab, tabZoom(activeTab) + ZOOM_STEP)
       else if (e.key === '-' || e.key === '_') setTabZoom(activeTab, tabZoom(activeTab) - ZOOM_STEP)
       else setTabZoom(activeTab, 1)
+    } else if (e.key.toLowerCase() === 'r') {
+      const activeTab = tabs[activeIdx]
+      if (!activeTab) return
+      e.preventDefault()
+      api.shellNav(activeTab.id, 'reload').catch(() => {})
     }
   })
 

@@ -111,14 +111,24 @@ holds one **own WebKitWebView per tab**:
 - Tab **title/URI** are forwarded to the chrome via `//export exportShellTitle/
   exportShellUri` (tabs_shell_export.go) → wails events `shell:title` / `shell:uri`
   (`{tabId, title|uri}`) on `shellCtx` → `tabBar.setPageTitle` in app.js.
+- Tab **navigation state** (back/forward availability + loading) is forwarded via
+  `//export exportShellNavState` (`notify::estimated-load-progress` + every uri
+  change) → wails event `shell:nav-state` `{tabId, canGoBack, canGoForward,
+  loading}` → `tabBar.setNavState` enables/disables the chrome tab-bar controls.
+  Navigation itself is driven by `ShellBack/ShellForward/ShellReload/ShellStop`
+  (→ `shell_nav`, op 17, action 0=back/1=fwd/2=reload/3=stop, `id≤0` targets the
+  chrome strip webview).
 - Tab **Web Notifications** are forwarded to the desktop via D-Bus (see the
   "Tab notifications → desktop" section below).
 - All Wails-bound Go methods go through `shell_request(...)` → `g_idle_add` →
   `shell_req_cb`, so every GTK/WebKit call happens on the GTK main thread. Ops:
   `0=setup, 1=show, 2=destroy, 3=reorder, 4=zoom, 5=chrome height, 6=open settings,
-  7=close settings, 8=inspector, 9=open notes, 10=close notes` (each shell_* C function keeps a re-entrance guard
+  7=close settings, 8=inspector, 9=open notes, 10=close notes, 16=precreate,
+  17=navigation` (each shell_* C function keeps a re-entrance guard
   so the idle-reinvoked code path does not repackage twice), then the terminal ops
   `11=toggle, 12=open/close, 13=destroy, 14=restart, 15=split` (see terminal.go).
+  Every tab webview connects `notify::title`, `notify::uri` and
+  `notify::estimated-load-progress` at creation (also for precreated webviews).
 - **Home strip**: repackaging the WebKitView into `vbox` also REMOVES the roaming
   WebKit home-iframe whitespace/resize quirks on the tab strip (the DA does not
   stretch the strip or the stack).
@@ -344,7 +354,8 @@ runtime (custom bridge). Any vite.config change needs a full rebuild.
    with callbacks: onTabChange→switchTab (→ `api.shellShowTab`), onAddTab→openSettings,
    onReorder→`api.reorderTabs`+`api.shellReorder`+reload, onSetDefault,
    onOpenExternal→`api.openExternal`, onRenameTab, onDuplicateTab,
-   onZoom/onResetZoom → `api.shellZoom` (native zoom) + persist settings.
+   onZoom/onResetZoom → `api.shellZoom` (native zoom) + persist settings,
+   onNav→`api.shellNav(id, back|forward|reload|stop)`.
 4. **Chrome strip height**: `measureStripHeight()` = `tabBar.getBoundingClientRect().bottom + 2`
    (min 60, fallback 104) → `api.shellSetChromeHeight(px)`; debounced (30ms) + on window
    resize. **DOM popups** (context menu, inspector dropdown) that would be clipped by the
@@ -354,11 +365,20 @@ runtime (custom bridge). Any vite.config change needs a full rebuild.
    `knownTabIds` (per-process) → `api.shellDestroyTab(id)`; respects
    `dashboardStore.getDefaultTab()` (localStorage `dashboard_default_tab`, default 'alpha').
 6. Events from Go: `runtime.EventsOn('shell:title')` → `tabBar.setPageTitle(id, title)`;
+   `EventsOn('shell:nav-state')` → `tabBar.setNavState(id, {...})` (back/forward/reload
+   controls of the ACTIVE tab); `EventsOn('shell:terminal-state')` → `tabBar.setTerminalState`
+   (marks the per-tab terminal button as open);
    `EventsOn('tabs:changed')` (emitted by the settings window after edits) → `loadTabs({preserveActive:true})`.
 7. `loadServiceStatus()` every 30s + on visibilitychange → `tabBar.setStatuses()`.
 8. Window controls: min/max/close/to-maximise-state via `api.window*` (wailsjs runtime).
 9. Keyboard nav: **Ctrl+Tab**/Ctrl+Shift+Tab cycle tabs, **Ctrl+T** open settings,
-   **Ctrl+± / Ctrl+0** zoom the active tab grid (via shellZoom).
+   **Ctrl+± / Ctrl+0** zoom the active tab grid (via shellZoom), **Ctrl+R** reload it.
+
+**Tab bar page controls**: a `.tab-nav-controls` cluster (back/forward, a
+reload button that swaps to **stop** while the active page is loading, and a
+zoom − / % / + group — the % label resets to 100%) sits at the LEFT of the tab
+bar and always acts on the ACTIVE tab. Back/forward are disabled by the
+`shell:nav-state` flags; the % label is synced from the per-tab `settings.zoom`.
 10. **Per-tab display settings** — `settings` map persisted via `api.updateTabSettings`.
     `zoom` (0.5–2.5) is applied NATIVELY via `api.shellZoom(id, level)` at show time +
     live; the SettingsModal zoom slider calls the same path.
@@ -502,6 +522,16 @@ tab content itself is native webviews handled by the Go shell.
   Open in browser, Duplicate, **Note** (opens the dedicated per-tab notes window),
   Zoom −/%/+ (keep-open), Reset zoom (toolbar removed with the iframe era).
   `setDefaultTabId()` marks the default.
+- **Page navigation controls** (`.tab-nav-controls`, LEFT of the tab bar): back,
+  forward, reload (becomes **stop** while loading), zoom −/%/+. All act on the
+  ACTIVE tab only. `setNavState(tabId, {canGoBack, canGoForward, loading})`
+  (from the `shell:nav-state` event) drives the disabled/stop states;
+  `refreshNavControls()` syncs everything on tab switch/zoom.
+- **Per-tab action buttons** (`tab-terminal-btn` + `tab-note-btn`): ghost buttons
+  (24px hit area) that always act on their own tab. The terminal button is marked
+  `.open` by `setTerminalState(tabId, {running, visible})` (from the
+  `shell:terminal-state` event) while the terminal is shown; the note button is
+  warning-coloured while the tab has notes.
 - **Persistent per-tab notes**: every pill has a small `tab-note-btn` (icon) that
   opens the dedicated notes window for that tab; it turns warning-coloured when the
   tab has notes (`tab.notes` is a non-empty `[]` list of note objects).
@@ -663,6 +693,12 @@ changes.
     `vte_terminal_set_scrollback_lines(> 0)` (positive) or the buffer stays at the
     default 512 lines. `scroll_on_output=FALSE` avoids jumping to the bottom on every
     line of output; `scroll_on_keystroke=TRUE` returns to the bottom when typing.
+18. **DO NOT reuse the `.loading` class for small chrome widgets** — legacy styles
+    (main.css, "Loading / empty / error" block) give `.loading` `min-height:200px`,
+    `padding:3rem` and a 34px `::before` spinner with `animation: spin ... infinite`.
+    Hooking it onto the tab-bar reload button (old code) made the whole chrome strip
+    ~230px tall and showed a huge endless spinner while a tab loaded. Use a scoped
+    class (e.g. `nav-loading`) + a small SVG spin rule instead.
 
 ## Debugging Commands
 ```bash
