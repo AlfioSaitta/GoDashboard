@@ -15,6 +15,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"unsafe"
+
+	"dashboard/internal/api"
+	"dashboard/internal/tab"
 )
 
 // NotesBridgeMessage is the JSON box the notes webview posts through the
@@ -70,14 +73,43 @@ func dispatchNotes(a *App, method string, args []interface{}) (interface{}, erro
 		if !ok {
 			return nil, fmt.Errorf("tab %d non trovato", id)
 		}
-		return map[string]interface{}{
-			"id":    t.ID,
-			"label": t.Title,
-			"icon":  t.Icon,
-			"notes": t.Notes,
-		}, nil
+		return tabNotesMap(t), nil
 
-	case "saveNotes":
+	case "saveNote":
+		// args: tabId, noteId (0/negativo = nuova), title, content
+		if len(args) < 4 {
+			return nil, fmt.Errorf("argomenti mancanti")
+		}
+		id, err := asInt(args[0])
+		if err != nil {
+			return nil, err
+		}
+		noteID, err := asInt(args[1])
+		if err != nil {
+			return nil, err
+		}
+		title, err := asString(args[2])
+		if err != nil {
+			return nil, err
+		}
+		content, err := asString(args[3])
+		if err != nil {
+			return nil, err
+		}
+		var tab api.Tab
+		if noteID > 0 {
+			tab, err = a.tabAPI.UpdateNote(ctx, fmt.Sprintf("%d", id), fmt.Sprintf("%d", noteID), title, content)
+		} else {
+			tab, err = a.tabAPI.AddNote(ctx, fmt.Sprintf("%d", id), title, content)
+		}
+		if err != nil {
+			return nil, err
+		}
+		// Let the chrome refresh the per-tab note indicator right away.
+		a.TabsChanged(ctx)
+		return tabNotesMap(apiToTab(tab)), nil
+
+	case "deleteNote":
 		if len(args) < 2 {
 			return nil, fmt.Errorf("argomenti mancanti")
 		}
@@ -85,17 +117,16 @@ func dispatchNotes(a *App, method string, args []interface{}) (interface{}, erro
 		if err != nil {
 			return nil, err
 		}
-		notes, err := asString(args[1])
+		noteID, err := asInt(args[1])
 		if err != nil {
 			return nil, err
 		}
-		tab, err := a.tabAPI.SaveNotes(ctx, fmt.Sprintf("%d", id), notes)
+		tab, err := a.tabAPI.DeleteNote(ctx, fmt.Sprintf("%d", id), fmt.Sprintf("%d", noteID))
 		if err != nil {
 			return nil, err
 		}
-		// Let the chrome refresh the per-tab note indicator right away.
 		a.TabsChanged(ctx)
-		return tab, nil
+		return tabNotesMap(apiToTab(tab)), nil
 
 	case "getTheme":
 		return a.GetThemeNoContext(), nil
@@ -159,4 +190,21 @@ func notesReplyJS(js string) {
 // notesResize resizes the notes window (called from the bridge "resize").
 func notesResize(w, h int) {
 	C.shell_notes_resize(C.int(w), C.int(h))
+}
+
+// apiToTab converts an api.Tab (returned by the TabAPI note methods) back to the
+// internal tab.Tab so the bridge can expose a uniform shape to the notes page.
+func apiToTab(t api.Tab) tab.Tab {
+	return tab.Tab{ID: t.ID, Title: t.Title, URL: t.URL, Icon: t.Icon, Notes: t.Notes, Settings: t.Settings}
+}
+
+// tabNotesMap serialises a tab together with its note list for the notes page.
+func tabNotesMap(t tab.Tab) map[string]interface{} {
+	return map[string]interface{}{
+		"id":         t.ID,
+		"label":      t.Title,
+		"icon":       t.Icon,
+		"notes":      t.Notes,
+		"note_count": len(t.Notes),
+	}
 }

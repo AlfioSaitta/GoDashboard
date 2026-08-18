@@ -68,7 +68,7 @@ export class TabBar {
     container.innerHTML = ''
 
     for (const tab of this.tabs) {
-      const hasNotes = !!(tab.notes && String(tab.notes).trim())
+      const hasNotes = !!(tab.notes && tab.notes.length > 0)
       const item = createElement(`
         <div class="tab-bar-item" data-tab-id="${tab.id}" draggable="true"
              title="${escapeHtml(this.tabTooltip(tab))}">

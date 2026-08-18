@@ -39,7 +39,7 @@ const NEW_ID = 'new'
 export class SettingsModal {
   constructor(overlayEl, {
     onSave, onUpdateTab, onRemoveTab, onClose, onReorder,
-    onThemeChange, onUpdateSettings, onNotesChange,
+    onThemeChange, onUpdateSettings, onManageNotes,
     onSaveService, onSaveGlobal, onFit,
   }) {
     this.overlay = overlayEl
@@ -50,7 +50,7 @@ export class SettingsModal {
     this.onReorder = onReorder
     this.onThemeChange = onThemeChange
     this.onUpdateSettings = onUpdateSettings
-    this.onNotesChange = onNotesChange
+    this.onManageNotes = onManageNotes
     this.onSaveService = onSaveService
     this.onSaveGlobal = onSaveGlobal
     this.onFit = onFit
@@ -453,8 +453,11 @@ export class SettingsModal {
           </div>
         </div>
         <div class="tab-settings-row tab-settings-notes">
-          <label for="notes-textarea-${tab.id}">Note</label>
-          <textarea id="notes-textarea-${tab.id}" class="tab-notes-input" data-tab-id="${tab.id}" rows="4" spellcheck="false" placeholder="Note persistenti per questo servizio…">${escapeHtml(tab.notes || '')}</textarea>
+          <label for="notes-manage-${tab.id}">Note</label>
+          <div class="notes-manage-row">
+            <span class="notes-manage-count">${(tab.notes && tab.notes.length) || 0} ${(tab.notes && tab.notes.length) === 1 ? 'nota' : 'note'}</span>
+            <button type="button" id="notes-manage-${tab.id}" class="btn btn-secondary btn-sm notes-manage-btn" data-tab-id="${tab.id}" title="Gestisci le note di questo tab">${icon('note', 13)} Gestisci</button>
+          </div>
         </div>
         <div class="form-actions">
           <button type="button" class="btn btn-secondary cancel-edit-btn" data-tab-id="${tab.id}">Annulla</button>
@@ -639,6 +642,14 @@ export class SettingsModal {
       range.addEventListener('input', () => this.updateZoomLabel(range.dataset.tabId, range.value))
     })
 
+    // Open the dedicated multi-note editor window for the tab.
+    list.querySelectorAll('.notes-manage-btn').forEach(btn => {
+      btn.addEventListener('click', (e) => {
+        e.preventDefault()
+        if (this.onManageNotes) this.onManageNotes(Number(btn.dataset.tabId))
+      })
+    })
+
     list.querySelectorAll('.remove-tab').forEach(btn => {
       btn.addEventListener('click', () => {
         this.removeCandidateId = String(btn.dataset.tabId)
@@ -778,11 +789,6 @@ export class SettingsModal {
       if (zoomRange) {
         const zoom = Number(zoomRange.value) / 100
         await this.onUpdateSettings(tabId, { zoom })
-      }
-
-      const notes = panel.querySelector('.tab-notes-input')?.value ?? ''
-      if (notes !== (tab.notes || '')) {
-        await this.onNotesChange(tabId, notes)
       }
 
       this.editingId = null

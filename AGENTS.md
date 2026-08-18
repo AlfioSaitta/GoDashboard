@@ -268,8 +268,10 @@ and `TabAPI` (tab CRUD):
 - `TabAPI.ListTabs` — if tabs.json is empty, seeds the 3 defaults (alpha/beta/gamma)
 - `TabAPI.UpdateTab(id, config)` — updates label/url/icon from a `map[string]interface{}`
 - `TabAPI.UpdateTabSettings(id, settings)` — replaces the per-tab display settings bag
-- `TabAPI.GetNotes(id)` / `TabAPI.SaveNotes(id, notes)` — per-tab persistent notes
-  (field `Notes` on the tab, `data/tabs.json`; `Tab`/`TabInfo` expose `notes`)
+- `TabAPI.AddNote(id, title, content)` / `TabAPI.UpdateNote(id, noteID, title, content)` /
+  `TabAPI.DeleteNote(id, noteID)` — multi-note CRUD on a tab (each returns the updated
+  `Tab` with its `Notes []Note` list; `tab.Note{ID,Title,Content,CreatedAt,UpdatedAt}`,
+  persisted in `data/tabs.json`; `Tab`/`TabInfo` expose `notes`)
 - `TabAPI.ReorderTabs(ids []int)` — reorders by id list (added for drag&drop)
 - API response types (`TabInfo`, `ServiceStatus`) all here.
   `TabInfo.Settings` carries the per-tab display settings (`{zoom: float}`).
@@ -298,9 +300,12 @@ The main dashboard webview + every tab webview enable developer extras at creati
 
 ### internal/tab/manager.go
 `TabManager` persists `[]Tab{ID,Title,URL,Icon,Notes}` to `data/tabs.json`
-(`<exedir>/data/tabs.json`; portable). `Add` assigns
-`nextID`. `Update` keeps old values when empty. `SetNotes(id, notes)` persists the
-per-tab notes atomically. `Reorder(ids)` validates the id set.
+(`<exedir>/data/tabs.json`; portable). `Tab.Notes` is a `[]Note` list
+(`Note{ID,Title,Content,CreatedAt,UpdatedAt}`). `Add` assigns
+`nextID`. `Update` keeps old values when empty. `AddNote`/`UpdateNote`/`DeleteNote`
+persist the per-tab note list atomically (ids unique per tab; timestamps set in Go).
+Legacy tabs.json files storing `notes` as a plain string are migrated at load into a
+single-note list. `Reorder(ids)` validates the id set.
 
 ### internal/tray
 D-Bus StatusNotifierItem on the session bus (no appindicator CGO dependency).
@@ -360,13 +365,14 @@ runtime (custom bridge). Any vite.config change needs a full rebuild.
 11. **Persistent per-tab notes** — the editor is a DEDICATED floating window (like the
     Settings window), NOT a DOM card in the chrome: `openNotes(tab)` →
     `api.openNotes(tab.id)` → `App.OpenNotes` → `shell_open_notes` (tabs_shell.go)
-    opens `wails://wails/notes.html?tab=<id>`. Every save goes through the notes
-    bridge → `TabAPI.SaveNotes` (persisted in `data/tabs.json`), then a
-    `TabsChanged()` so the chrome refreshes the per-tab note indicator. Because the
-    editor lives in its own window the chrome strip is never expanded and the tab
-    pages never shift while editing notes. Open from the tab context menu **Note** or
-    the per-tab `tab-note-btn`; the settings window's per-tab panel still hosts a
-    notes textarea (saves via the `saveNotes` bridge method).
+    opens `wails://wails/notes.html?tab=<id>`. A tab owns a LIST of notes; every save
+    goes through the notes bridge (`saveNote`/`deleteNote` → `TabAPI.AddNote/
+    UpdateNote/DeleteNote`, persisted in `data/tabs.json`), then a `TabsChanged()` so
+    the chrome refreshes the per-tab note indicator. Because the editor lives in its
+    own window the chrome strip is never expanded and the tab pages never shift while
+    editing notes. Open from the tab context menu **Note**, the per-tab `tab-note-btn`,
+    or the **Gestisci** button of the settings window's per-tab panel (which shows the
+    current note count instead of a single-note textarea).
 11. **Inspector dropdown** (header, right of settings) — `api.inspectorOpen(mode, activeTabId)`
     with `bottom|right|left|float` and `api.inspectorClose()`; hidden when
     `api.inspectorAvailable()` is false (non-devtools build).
@@ -386,7 +392,7 @@ That page is a **separate vite entry** (`frontend/settings.html` →
 - Replies come back via `shell_settings_eval` (g_idle → `webkit_web_view_evaluate_javascript`)
   → `window.__dashReply({id, ok, result|error})`.
 Bridge methods: getTabs/getTheme/getSystemTheme/setTheme/saveTabConfig/removeTab/
-updateTab/updateTabSettings/getNotes/saveNotes/reorderTabs/tabsChanged/closeSettings/shellZoom/resize.
+updateTab/updateTabSettings/openNotes/reorderTabs/tabsChanged/closeSettings/shellZoom/resize.
 - **Frameless**: the window is `gtk_window_set_decorated(FALSE)` like the main app.
   Dragging is bound to the CARD HEADER, not a strip above it: `settings_drag_press`
   (button-press-event on the webview) asks the *page* via
@@ -452,7 +458,12 @@ thread). A **C-side fallback** (`settings_fit_timeout` in tabs_shell.go) probes
 ### Notes window (per-tab notes editor) — dedicated floating window
 The per-tab notes editor is a SECOND floating window reusing the settings-window
 architecture (own webview + ucm + custom bridge, NO Wails IPC) so the chrome strip
-is never touched:
+is never touched. **Multi-note**: a tab owns a list of notes
+(`Tab.Notes []Note`, persisted in `data/tabs.json`; each note has its own
+`id/title/content/created_at/updated_at`). The window shows a two-pane card: a
+left sidebar lists the tab's notes (title + snippet + date, delete on hover) and
+a right pane edits the selected note (title + content). Legacy single-string
+`notes` in tabs.json are migrated into a one-element list at load.
 - `App.OpenNotes(tabID)` → `shellOpenNotes` (tabs_shell.go op 9) →
   `shell_open_notes` creates a frameless, `transient_for` + `keep_above` (NOT
   modal) window with a dedicated ucm registering the `dashboardNotes` message
@@ -462,14 +473,17 @@ is never touched:
 - The page talks to Go via `window.webkit.messageHandlers.dashboardNotes.postMessage`
   → `exportNotesMessage` → `handleNotesMessage` (notes_bridge.go) dispatching on
   `App`; replies come back via `shell_notes_eval` → `window.__dashReply`.
-  Bridge methods: getTab/getNotes/saveNotes/getTheme/getSystemTheme/closeNotes/resize.
-  `saveNotes` ends with `TabsChanged()` so the chrome refreshes the per-tab note
-  indicator immediately.
+  Bridge methods: getTab/saveNote/deleteNote/getTheme/getSystemTheme/closeNotes/resize.
+  `getTab` returns the tab with its `notes` list + `note_count`; `saveNote` upserts
+  (noteId ≤ 0 creates a new note via `TabAPI.AddNote`, otherwise `TabAPI.UpdateNote`);
+  `deleteNote` removes it. All three note ops end with `TabsChanged()` so the chrome
+  refreshes the per-tab note indicator immediately. The bridge reply returns the
+  updated tab so the page re-syncs ids after a create.
 - Same window dressing as settings: transparent when the compositor allows
   (`body.notes-mode.dash-transparent`), drag on the card header
   (`notes_drag_press`, `.notes-header`), content-fit (`scheduleFit` in
   notes/main.js + the `notes_fit_timeout` C fallback armed on the first
-  `getNotes` message), 10px margin around the 560px `.notes-card`. The page
+  `getTab` message), 10px margin around the 720px `.notes-card`. The page
   centres the card horizontally and keeps it flush to the top.
 - Because the editor is a real window, opening it NEVER resizes the chrome strip
   or the tab-stack: the tab pages below stay exactly where they were.
@@ -490,7 +504,7 @@ tab content itself is native webviews handled by the Go shell.
   `setDefaultTabId()` marks the default.
 - **Persistent per-tab notes**: every pill has a small `tab-note-btn` (icon) that
   opens the dedicated notes window for that tab; it turns warning-coloured when the
-  tab has notes (`tab.notes` non-empty, persisted via `TabAPI.SaveNotes`).
+  tab has notes (`tab.notes` is a non-empty `[]` list of note objects).
   `refreshNotes()` updates the indicator in place after a save.
 - `setPageTitle(tabId, title)` shows the live page title transiently (ignored while
   an inline rename is active). `onPopupChange(open)` is called when the context menu

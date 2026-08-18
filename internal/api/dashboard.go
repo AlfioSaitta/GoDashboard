@@ -71,7 +71,7 @@ func (t *TabAPI) UpdateTab(ctx context.Context, id string, config map[string]int
 		return Tab{}, fmt.Errorf("tab %d not found", intID)
 	}
 	log.Printf("TabAPI.UpdateTab: updated tab %d", intID)
-	return Tab{ID: tab.ID, Title: tab.Title, URL: tab.URL, Icon: tab.Icon, Notes: tab.Notes, Settings: tab.Settings}, nil
+	return toAPITab(tab), nil
 }
 
 // UpdateTabSettings replaces the per-tab display settings (zoom, toolbar, ...).
@@ -88,34 +88,58 @@ func (t *TabAPI) UpdateTabSettings(ctx context.Context, id string, settings map[
 		return Tab{}, fmt.Errorf("tab %d not found", intID)
 	}
 	log.Printf("TabAPI.UpdateTabSettings: tab %d settings updated", intID)
-	return Tab{ID: tb.ID, Title: tb.Title, URL: tb.URL, Icon: tb.Icon, Notes: tb.Notes, Settings: tb.Settings}, nil
+	return toAPITab(tb), nil
 }
 
-// GetNotes returns the persistent notes of the tab identified by id.
-func (t *TabAPI) GetNotes(ctx context.Context, id string) (string, error) {
-	intID, err := strconv.Atoi(id)
-	if err != nil {
-		return "", fmt.Errorf("invalid tab id %q", id)
-	}
-	tb, ok := t.manager.Get(intID)
-	if !ok {
-		return "", fmt.Errorf("tab %d not found", intID)
-	}
-	return tb.Notes, nil
-}
-
-// SaveNotes sets the persistent notes of the tab identified by id.
-func (t *TabAPI) SaveNotes(ctx context.Context, id string, notes string) (Tab, error) {
+// AddNote appends a new note to the tab identified by id (id is a string,
+// matching the other tab methods) and returns the updated tab.
+func (t *TabAPI) AddNote(ctx context.Context, id string, title, content string) (Tab, error) {
 	intID, err := strconv.Atoi(id)
 	if err != nil {
 		return Tab{}, fmt.Errorf("invalid tab id %q", id)
 	}
-	tb, ok := t.manager.SetNotes(intID, notes)
+	tb, ok := t.manager.AddNote(intID, tab.Note{Title: title, Content: content})
 	if !ok {
 		return Tab{}, fmt.Errorf("tab %d not found", intID)
 	}
-	log.Printf("TabAPI.SaveNotes: tab %d notes saved (%d bytes)", intID, len(notes))
-	return Tab{ID: tb.ID, Title: tb.Title, URL: tb.URL, Icon: tb.Icon, Notes: tb.Notes, Settings: tb.Settings}, nil
+	log.Printf("TabAPI.AddNote: tab %d note added", intID)
+	return toAPITab(tb), nil
+}
+
+// UpdateNote replaces the note (matched by noteID) on the tab identified by id.
+func (t *TabAPI) UpdateNote(ctx context.Context, id, noteID, title, content string) (Tab, error) {
+	intID, err := strconv.Atoi(id)
+	if err != nil {
+		return Tab{}, fmt.Errorf("invalid tab id %q", id)
+	}
+	intNoteID, err := strconv.Atoi(noteID)
+	if err != nil {
+		return Tab{}, fmt.Errorf("invalid note id %q", noteID)
+	}
+	tb, ok := t.manager.UpdateNote(intID, tab.Note{ID: intNoteID, Title: title, Content: content})
+	if !ok {
+		return Tab{}, fmt.Errorf("tab %d or note %d not found", intID, intNoteID)
+	}
+	log.Printf("TabAPI.UpdateNote: tab %d note %d updated", intID, intNoteID)
+	return toAPITab(tb), nil
+}
+
+// DeleteNote removes the note with the given id from the tab identified by id.
+func (t *TabAPI) DeleteNote(ctx context.Context, id, noteID string) (Tab, error) {
+	intID, err := strconv.Atoi(id)
+	if err != nil {
+		return Tab{}, fmt.Errorf("invalid tab id %q", id)
+	}
+	intNoteID, err := strconv.Atoi(noteID)
+	if err != nil {
+		return Tab{}, fmt.Errorf("invalid note id %q", noteID)
+	}
+	tb, ok := t.manager.DeleteNote(intID, intNoteID)
+	if !ok {
+		return Tab{}, fmt.Errorf("tab %d or note %d not found", intID, intNoteID)
+	}
+	log.Printf("TabAPI.DeleteNote: tab %d note %d deleted", intID, intNoteID)
+	return toAPITab(tb), nil
 }
 
 // ReorderTabs reorders tabs to match the order of the provided ids.
@@ -140,7 +164,7 @@ type TabInfo struct {
 	Label    string                 `json:"label"`
 	Icon     string                 `json:"icon"`
 	URL      string                 `json:"url"`
-	Notes    string                 `json:"notes,omitempty"`
+	Notes    []tab.Note             `json:"notes,omitempty"`
 	Settings map[string]interface{} `json:"settings,omitempty"`
 }
 
@@ -149,8 +173,12 @@ type Tab struct {
 	Title    string                 `json:"title"`
 	URL      string                 `json:"url"`
 	Icon     string                 `json:"icon,omitempty"`
-	Notes    string                 `json:"notes,omitempty"`
+	Notes    []tab.Note             `json:"notes,omitempty"`
 	Settings map[string]interface{} `json:"settings,omitempty"`
+}
+
+func toAPITab(t tab.Tab) Tab {
+	return Tab{ID: t.ID, Title: t.Title, URL: t.URL, Icon: t.Icon, Notes: t.Notes, Settings: t.Settings}
 }
 
 type ServiceStatus struct {
